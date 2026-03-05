@@ -22,11 +22,8 @@ jobs:
     - name: Set up Python ${{ matrix.python-version }}
       run: uv python install ${{ matrix.python-version }}
       
-    - name: Install Python dependencies
+    - name: Install dependencies and build extension
       run: uv sync --all-extras
-
-    - name: Build Python extension
-      run: uv run pip install -e .
       
     - name: Lint with ruff
       run: |
