@@ -1,0 +1,30 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv/
+
+# Cache directories
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Build artifacts
+*.so
+*.cmake/
+CMakeFiles/
+CMakeCache.txt
+build_test/
+src/yoga/*.so
+src/yoga/CMakeInit.txt
+src/yoga/install_manifest.txt
+src/yoga/__pycache__/
+
+# Reference C++ code (used for porting, not part of this repo)
+reference/
+
