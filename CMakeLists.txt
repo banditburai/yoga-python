@@ -18,7 +18,7 @@ else()
   FetchContent_Declare(
     yoga
     GIT_REPOSITORY https://github.com/facebook/yoga.git
-    GIT_TAG main
+    GIT_TAG cfdacac0e3c2e91ab15939027688756271a66025
     GIT_PROGRESS TRUE
   )
   FetchContent_MakeAvailable(yoga)
