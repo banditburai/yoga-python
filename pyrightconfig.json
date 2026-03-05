@@ -1,0 +1,7 @@
+{
+  "include": ["src", "tests"],
+  "exclude": ["reference", "build_test", ".venv", "**/__pycache__"],
+  "pythonVersion": "3.12",
+  "pythonPlatform": "All",
+  "typeCheckingMode": "basic"
+}

@@ -44,11 +44,11 @@ root.calculate_layout(300, 200, Direction.LTR)
 
 print(f"child_a: {child_a.layout_left}, {child_a.layout_top}, "
       f"{child_a.layout_width}x{child_a.layout_height}")
-# child_a: 10.0, 10.0, 86.66666412353516x180.0
+# child_a: 10.0, 10.0, 90.0x180.0
 
 print(f"child_b: {child_b.layout_left}, {child_b.layout_top}, "
       f"{child_b.layout_width}x{child_b.layout_height}")
-# child_b: 106.66666412353516, 10.0, 183.33334350585938x180.0
+# child_b: 110.0, 10.0, 180.0x180.0
 ```
 
 ## API overview
@@ -103,7 +103,7 @@ node.remove_child(child)
 node.remove_all_children()
 node.set_children([child_a, child_b])
 node.child_count                     # int
-node.get_child(index)                # Node
+node[index]                          # Node (supports indexing)
 ```
 
 **Layout:**
@@ -159,7 +159,7 @@ YGValueUndefined        # undefined
 
 ## Enums
 
-All Yoga enums are available as Python `IntEnum` types:
+All Yoga enums are available as Python enum types (pybind11 enums, int-convertible):
 
 `Direction`, `FlexDirection`, `Justify`, `Align`, `PositionType`, `Wrap`, `Overflow`, `Display`, `Edge`, `Unit`, `MeasureMode`, `Dimension`, `BoxSizing`, `Gutter`, `Errata`, `NodeType`, `LogLevel`, `ExperimentalFeature`
 
@@ -168,15 +168,15 @@ All Yoga enums are available as Python `IntEnum` types:
 ```bash
 git clone https://github.com/banditburai/yoga-python.git
 cd yoga-python
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+uv sync --dev
 
 # Run tests
-pytest tests/ -v
+uv run pytest tests/ -v
 
-# Lint
-ruff check
-ruff format --check
+# Lint & type checking
+uv run ruff check
+uv run ruff format --check
+uv run pyright
 ```
 
 ## Test coverage
