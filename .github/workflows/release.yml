@@ -39,6 +39,8 @@ jobs:
         env:
           CIBW_BUILD: "cp312-* cp313-*"
           CIBW_SKIP: "*-win32 *-manylinux_i686 *-musllinux_*"
+          # CMake FetchContent clones Yoga from GitHub; manylinux image has no git
+          CIBW_BEFORE_ALL_LINUX: "yum install -y git"
 
       - uses: actions/upload-artifact@v4
         with:
