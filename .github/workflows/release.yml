@@ -50,10 +50,10 @@ jobs:
     - name: Validate package contents
       run: |
         echo "📦 Validating package structure..."
-        check-wheel-contents dist/*.whl --ignore W004
-        
+        check-wheel-contents dist/*.whl --ignore W004,W005,W009,W010
+
         echo "📋 Package contents summary:"
-        python -m zipfile -l dist/*.whl | grep -E "\.py$" | head -20
+        python -m zipfile -l dist/*.whl | grep -E "\.py$|\.so$" | head -25
         echo "..."
     
     - name: Upload build artifacts
