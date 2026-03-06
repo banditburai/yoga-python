@@ -1,6 +1,5 @@
 import pytest
-from yoga.value import YGValue
-from yoga.enums import Unit
+from yoga import YGValue, Unit
 
 
 class TestYGValue:

@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from typing import Any
 
-# Enums (pybind11 enum types)
+# Enums (nanobind enum types)
 class Direction:
     Inherit: Direction
     LTR: Direction
@@ -291,8 +291,8 @@ NodeBaselineEnd: EventType
 # YGValue
 class YGValue:
     value: float
-    unit: int
-    def __init__(self, value: float, unit: int) -> None: ...
+    unit: Unit | int
+    def __init__(self, value: float, unit: Unit | int) -> None: ...
     def __eq__(self, other: object) -> bool: ...
     def __neg__(self) -> YGValue: ...
     def __repr__(self) -> str: ...

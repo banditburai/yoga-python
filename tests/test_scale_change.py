@@ -14,7 +14,6 @@ def assert_float_approx(actual, expected, rel_tol=1e-6):
     assert abs(actual - expected) <= rel_tol * max(abs(expected), 1), f"{actual} != {expected}"
 
 
-
 class TestScaleChange:
     def test_scale_change_invalidates_layout(self):
         config = Config()

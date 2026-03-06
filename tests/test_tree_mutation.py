@@ -9,7 +9,6 @@ def get_children(node):
     return children
 
 
-
 class TestTreeMutation:
     def test_set_children_adds_children_to_parent(self):
         config = Config()

@@ -6,7 +6,6 @@ def assert_float_approx(actual, expected, rel_tol=1e-6):
     assert abs(actual - expected) <= rel_tol * max(abs(expected), 1), f"{actual} != {expected}"
 
 
-
 class TestZeroOutLayout:
     def test_zero_out_layout(self):
         config = Config()

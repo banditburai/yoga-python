@@ -7,7 +7,6 @@ from yoga import (
 )
 
 
-
 class TestLayoutableChildren:
     def test_layoutable_children_single_contents_node(self):
         config = Config()

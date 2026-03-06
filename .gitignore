@@ -28,3 +28,7 @@ src/yoga/__pycache__/
 # Reference C++ code (used for porting, not part of this repo)
 reference/
 
+# Benchmarking (dev-only)
+benchmark.py
+*_results.json
+
