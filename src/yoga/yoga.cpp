@@ -368,6 +368,12 @@ NB_MODULE(yoga, m) {
                 YGConfigSetLogger(&self, yogaLogger);
             }
         })
+        .def("set_experimental_feature_enabled", [](yoga::Config& self, int feature, bool enabled) {
+            self.setExperimentalFeatureEnabled((yoga::ExperimentalFeature)feature, enabled);
+        }, nb::arg("feature"), nb::arg("enabled"))
+        .def("is_experimental_feature_enabled", [](yoga::Config& self, int feature) {
+            return self.isExperimentalFeatureEnabled((yoga::ExperimentalFeature)feature);
+        }, nb::arg("feature"))
         .def("__enter__", [](yoga::Config& self) { return &self; })
         .def("__exit__", [](yoga::Config&, const nb::object&, const nb::object&, const nb::object&) { });
 
@@ -386,6 +392,32 @@ NB_MODULE(yoga, m) {
         .def("free_recursive", [](yoga::Node& self) { YGNodeFreeRecursive(&self); })
         .def("reset", [](yoga::Node& self) { YGNodeReset(&self); })
         .def("copy_style", [](yoga::Node& self, const yoga::Node& src) { YGNodeCopyStyle(&self, &src); })
+        .def("set_context", [](yoga::Node& self, nb::object context) {
+            auto* oldContext = static_cast<nb::object*>(self.getContext());
+            delete oldContext;
+            if (context.is_none()) {
+                self.setContext(nullptr);
+            } else {
+                auto* newContext = new nb::object(context);
+                self.setContext(newContext);
+            }
+        })
+        .def("get_context", [](yoga::Node& self) -> nb::object {
+            auto* context = static_cast<nb::object*>(self.getContext());
+            if (context) {
+                return nb::object(*context);
+            }
+            return nb::none();
+        })
+        .def("get_config", [](yoga::Node& self) -> yoga::Config* {
+            return static_cast<yoga::Config*>(const_cast<YGConfigRef>(YGNodeGetConfig(&self)));
+        })
+        .def("set_config", [](yoga::Node& self, yoga::Config& config) {
+            YGNodeSetConfig(&self, &config);
+        })
+        .def("swap_child", [](yoga::Node& self, yoga::Node& child, size_t index) {
+            YGNodeSwapChild(&self, &child, index);
+        }, nb::arg("child"), nb::arg("index"))
         .def("clone", [](yoga::Node& self) -> yoga::Node* { 
             return static_cast<yoga::Node*>(YGNodeClone(&self)); 
         })
