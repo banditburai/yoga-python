@@ -15,9 +15,6 @@ from yoga import (
 )
 
 
-@pytest.mark.skip(
-    reason="nanobind pytest crash: clone() + free_recursive() causes abort. Works in regular Python."
-)
 class TestPersistentNodeCloning:
     def test_changing_sibling_height_does_not_clone_neighbors(self):
         """
@@ -118,3 +115,6 @@ class TestPersistentNodeCloning:
         aPrime.calculate_layout(100, 100, Direction.LTR)
 
         assert len(nodes_cloned) == 1
+
+        a.free_recursive()
+        aPrime.free_recursive()

@@ -1,6 +1,8 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/vector.h>
 
+#include <unordered_set>
+
 #include <yoga/Yoga.h>
 #include <yoga/node/Node.h>
 #include <yoga/config/Config.h>
@@ -9,21 +11,115 @@
 namespace nb = nanobind;
 namespace yoga = facebook::yoga;
 
-struct MeasureContext {
-    nb::object callback;
+// Unified context for all node callbacks + user context.
+// Stored in node->getContext() as a single allocation.
+struct NodeContext {
+    nb::object user_context;
+    nb::object measure_callback;
+    nb::object baseline_callback;
+    nb::object dirtied_callback;
 };
 
-struct BaselineContext {
-    nb::object callback;
-};
-
-struct DirtiedContext {
-    nb::object callback;
-};
-
+// Separate context for Config's clone callback (stored in config context).
 struct CloneContext {
     nb::object callback;
 };
+
+// Track nodes created by nanobind (via Python Node() constructor).
+// Nodes NOT in this set were allocated by YGNodeClone (system new) and
+// must be delete'd manually in free()/free_recursive().
+static std::unordered_set<yoga::Node*> nanobindManagedNodes;
+
+// Track all allocated NodeContexts and CloneContexts for module cleanup.
+// nanobind doesn't reliably call __del__ during interpreter shutdown,
+// so we clean up all remaining contexts in the module cleanup capsule.
+static std::unordered_set<NodeContext*> allNodeContexts;
+static std::unordered_set<CloneContext*> allCloneContexts;
+
+// --- NodeContext helpers ---
+
+static NodeContext* getNodeContext(yoga::Node* node) {
+    return static_cast<NodeContext*>(node->getContext());
+}
+
+static NodeContext* getOrCreateNodeContext(yoga::Node* node) {
+    auto* ctx = getNodeContext(node);
+    if (!ctx) {
+        ctx = new NodeContext();
+        allNodeContexts.insert(ctx);
+        node->setContext(ctx);
+    }
+    return ctx;
+}
+
+static void cleanupNodeContext(yoga::Node* node) {
+    auto* ctx = getNodeContext(node);
+    if (ctx) {
+        allNodeContexts.erase(ctx);
+        delete ctx;
+        node->setContext(nullptr);
+    }
+}
+
+static void cleanupCloneContext(yoga::Config& config) {
+    auto* ctx = static_cast<CloneContext*>(YGConfigGetContext(&config));
+    if (ctx) {
+        allCloneContexts.erase(ctx);
+        delete ctx;
+        YGConfigSetContext(&config, nullptr);
+    }
+}
+
+// --- Safe free functions ---
+
+static void safeNodeFree(yoga::Node& self) {
+    // Clean up Python context
+    cleanupNodeContext(&self);
+
+    // Remove from owner (mirrors YGNodeFree)
+    if (auto* owner = self.getOwner()) {
+        owner->removeChild(&self);
+        self.setOwner(nullptr);
+    }
+
+    // Orphan all children (mirrors YGNodeFree)
+    const size_t childCount = self.getChildCount();
+    for (size_t i = 0; i < childCount; i++) {
+        self.getChild(i)->setOwner(nullptr);
+    }
+    self.clearChildren();
+
+    // Publish deallocation event (mirrors YGNodeFree)
+    yoga::Event::publish<yoga::Event::NodeDeallocation>(
+        &self, {YGNodeGetConfig(&self)});
+
+    // If this node was NOT created by nanobind (i.e. it was allocated via
+    // YGNodeClone using system new), we must delete it ourselves.
+    // nanobind-managed nodes are freed by nanobind's GC.
+    if (nanobindManagedNodes.count(&self)) {
+        nanobindManagedNodes.erase(&self);
+        // Don't delete - nanobind owns this memory
+    } else {
+        delete &self;
+    }
+}
+
+static void safeNodeFreeRecursive(yoga::Node& self) {
+    // Mirrors YGNodeFreeRecursive: recursively free owned children
+    size_t skipped = 0;
+    while (self.getChildCount() > skipped) {
+        auto* child = self.getChild(skipped);
+        if (child->getOwner() != &self) {
+            skipped += 1;
+        } else {
+            YGNodeRemoveChild(&self, child);
+            safeNodeFreeRecursive(*child);
+        }
+    }
+    safeNodeFree(self);
+}
+
+// --- Callbacks ---
 
 static YGNodeRef yogaCloneNodeCallback(
     YGNodeConstRef oldNode,
@@ -31,13 +127,13 @@ static YGNodeRef yogaCloneNodeCallback(
     size_t childIndex) {
     YGConfigConstRef config = YGNodeGetConfig(const_cast<YGNodeRef>(oldNode));
     if (!config) return nullptr;
-    
+
     void* ctx = YGConfigGetContext(const_cast<YGConfigRef>(config));
     if (!ctx) return nullptr;
-    
+
     auto* context = static_cast<CloneContext*>(ctx);
     if (context->callback.is_none()) return nullptr;
-    
+
     nb::gil_scoped_acquire acquire;
     try {
         yoga::Node* oldNodePtr = const_cast<yoga::Node*>(reinterpret_cast<const yoga::Node*>(oldNode));
@@ -66,17 +162,17 @@ static YGSize yogaMeasureCallback(
     float height,
     YGMeasureMode heightMode) {
     yoga::Node* nodePtr = const_cast<yoga::Node*>(reinterpret_cast<const yoga::Node*>(node));
-    auto* context = static_cast<MeasureContext*>(nodePtr->getContext());
-    if (!context || context->callback.is_none()) {
+    auto* ctx = getNodeContext(nodePtr);
+    if (!ctx || ctx->measure_callback.is_none()) {
         return YGSize{YGUndefined, YGUndefined};
     }
     nb::gil_scoped_acquire acquire;
     try {
-        nb::object result = context->callback(
-            nodePtr, 
-            width, 
-            nb::cast(widthMode), 
-            height, 
+        nb::object result = ctx->measure_callback(
+            nodePtr,
+            width,
+            nb::cast(widthMode),
+            height,
             nb::cast(heightMode)
         );
         if (nb::isinstance<nb::dict>(result)) {
@@ -102,13 +198,13 @@ static float yogaBaselineCallback(
     float width,
     float height) {
     yoga::Node* nodePtr = const_cast<yoga::Node*>(reinterpret_cast<const yoga::Node*>(node));
-    auto* context = static_cast<BaselineContext*>(nodePtr->getContext());
-    if (!context || context->callback.is_none()) {
+    auto* ctx = getNodeContext(nodePtr);
+    if (!ctx || ctx->baseline_callback.is_none()) {
         return height;
     }
     nb::gil_scoped_acquire acquire;
     try {
-        return nb::cast<float>(context->callback(nodePtr, width, height));
+        return nb::cast<float>(ctx->baseline_callback(nodePtr, width, height));
     } catch (...) {
     }
     return height;
@@ -116,19 +212,15 @@ static float yogaBaselineCallback(
 
 static void yogaDirtiedCallback(YGNodeConstRef node) {
     yoga::Node* nodePtr = const_cast<yoga::Node*>(reinterpret_cast<const yoga::Node*>(node));
-    auto* context = static_cast<DirtiedContext*>(nodePtr->getContext());
-    if (!context || context->callback.is_none()) {
+    auto* ctx = getNodeContext(nodePtr);
+    if (!ctx || ctx->dirtied_callback.is_none()) {
         return;
     }
     nb::gil_scoped_acquire acquire;
     try {
-        context->callback();
+        ctx->dirtied_callback();
     } catch (...) {
     }
-}
-
-static YGValue YGValueToYGValue(YGValue v) {
-    return v;
 }
 
 NB_MODULE(yoga, m) {
@@ -149,7 +241,7 @@ NB_MODULE(yoga, m) {
         .export_values();
 
     nb::enum_<YGErrata>(m, "Errata")
-        .value("None", YGErrataNone)
+        .value("None_", YGErrataNone)
         .value("StretchFlexBasis", YGErrataStretchFlexBasis)
         .value("AbsolutePositionWithoutInsetsExcludesPadding", YGErrataAbsolutePositionWithoutInsetsExcludesPadding)
         .value("AbsolutePercentAgainstInnerSize", YGErrataAbsolutePercentAgainstInnerSize)
@@ -315,6 +407,15 @@ NB_MODULE(yoga, m) {
         return (float)YGRoundValueToPixelGrid(value, pointScaleFactor, ceil, floor);
     }, nb::arg("value"), nb::arg("point_scale_factor"), nb::arg("ceil") = false, nb::arg("floor") = false);
 
+    // LayoutData binding (for event system)
+    nb::class_<yoga::LayoutData>(m, "LayoutData")
+        .def_ro("layouts", &yoga::LayoutData::layouts)
+        .def_ro("measures", &yoga::LayoutData::measures)
+        .def_ro("maxMeasureCache", &yoga::LayoutData::maxMeasureCache)
+        .def_ro("cachedLayouts", &yoga::LayoutData::cachedLayouts)
+        .def_ro("cachedMeasures", &yoga::LayoutData::cachedMeasures)
+        .def_ro("measureCallbacks", &yoga::LayoutData::measureCallbacks);
+
     m.def("event_reset", []() { yoga::Event::reset(); });
     m.def("event_subscribe", [](nb::object callback) {
         yoga::Event::subscribe([callback](YGNodeConstRef node, yoga::Event::Type type, const yoga::Event::Data& data) {
@@ -324,10 +425,10 @@ NB_MODULE(yoga, m) {
                 if (type == yoga::Event::Type::LayoutPassEnd) {
                     auto& eventData = data.get<yoga::Event::Type::LayoutPassEnd>();
                     auto* layoutData = eventData.layoutData;
-                    callback(node_id, nb::cast<int>(type), 
+                    callback(node_id, nb::cast(type),
                         layoutData ? nb::cast(*layoutData) : nb::none());
                 } else {
-                    callback(node_id, nb::cast<int>(type), nb::none());
+                    callback(node_id, nb::cast(type), nb::none());
                 }
             } catch (...) {
             }
@@ -337,7 +438,7 @@ NB_MODULE(yoga, m) {
 
     nb::class_<yoga::Config>(m, "Config")
         .def("__init__", [](yoga::Config *t) { new (t) yoga::Config(yogaLogger); })
-        .def_prop_rw("use_web_defaults", 
+        .def_prop_rw("use_web_defaults",
             [](yoga::Config& self) { return self.useWebDefaults(); },
             [](yoga::Config& self, bool value) { self.setUseWebDefaults(value); })
         .def_prop_rw("point_scale_factor",
@@ -347,20 +448,20 @@ NB_MODULE(yoga, m) {
             [](yoga::Config& self) { return YGConfigGetErrata(&self); },
             [](yoga::Config& self, YGErrata value) { YGConfigSetErrata(&self, value); })
         .def("set_clone_node_callback", [](yoga::Config& self, nb::object callback) {
-            auto* oldContext = static_cast<CloneContext*>(YGConfigGetContext(&self));
-            delete oldContext;
+            cleanupCloneContext(self);
             if (callback.is_none()) {
                 self.setCloneNodeCallback(nullptr);
-                YGConfigSetContext(&self, nullptr);
             } else {
                 auto* context = new CloneContext{callback};
+                allCloneContexts.insert(context);
                 self.setCloneNodeCallback(yogaCloneNodeCallback);
                 YGConfigSetContext(&self, context);
             }
         })
         .def("clone_node", [](yoga::Config& self, yoga::Node& node, yoga::Node* owner, size_t childIndex) -> yoga::Node* {
             return static_cast<yoga::Node*>(self.cloneNode(&node, owner, childIndex));
-        }, nb::arg("node"), nb::arg("owner") = nullptr, nb::arg("child_index") = 0)
+        }, nb::arg("node"), nb::arg("owner") = nullptr, nb::arg("child_index") = 0,
+           nb::rv_policy::reference)
         .def("set_logger", [](yoga::Config& self, nb::object logger) {
             if (logger.is_none()) {
                 YGConfigSetLogger(&self, nullptr);
@@ -368,70 +469,83 @@ NB_MODULE(yoga, m) {
                 YGConfigSetLogger(&self, yogaLogger);
             }
         })
-        .def("set_experimental_feature_enabled", [](yoga::Config& self, int feature, bool enabled) {
-            self.setExperimentalFeatureEnabled((yoga::ExperimentalFeature)feature, enabled);
+        .def("set_experimental_feature_enabled", [](yoga::Config& self, YGExperimentalFeature feature, bool enabled) {
+            self.setExperimentalFeatureEnabled(static_cast<yoga::ExperimentalFeature>(feature), enabled);
         }, nb::arg("feature"), nb::arg("enabled"))
-        .def("is_experimental_feature_enabled", [](yoga::Config& self, int feature) {
-            return self.isExperimentalFeatureEnabled((yoga::ExperimentalFeature)feature);
+        .def("is_experimental_feature_enabled", [](yoga::Config& self, YGExperimentalFeature feature) {
+            return self.isExperimentalFeatureEnabled(static_cast<yoga::ExperimentalFeature>(feature));
         }, nb::arg("feature"))
-        .def("__enter__", [](yoga::Config& self) { return &self; })
-        .def("__exit__", [](yoga::Config&, const nb::object&, const nb::object&, const nb::object&) { });
+        .def("__enter__", [](yoga::Config& self) -> yoga::Config& { return self; },
+            nb::rv_policy::reference)
+        .def("__exit__", [](yoga::Config& self, const nb::object&, const nb::object&, const nb::object&) {
+            cleanupCloneContext(self);
+        });
 
     nb::class_<yoga::Node>(m, "Node")
-        .def("__init__", [](yoga::Node *t) { new (t) yoga::Node(); })
-        .def("__init__", [](yoga::Node *t, yoga::Config* config) { new (t) yoga::Node(config); }, nb::arg("config"))
-        .def("__len__", [](yoga::Node& self) { return YGNodeGetChildCount(&self); })
-        .def("__getitem__", [](yoga::Node& self, size_t index) -> yoga::Node* { 
-            return static_cast<yoga::Node*>(YGNodeGetChild(&self, index)); 
-        }, nb::rv_policy::reference_internal)
-        .def("__enter__", [](yoga::Node& self) { return &self; })
-        .def("__exit__", [](yoga::Node& self, const nb::object&, const nb::object&, const nb::object&) { 
-            YGNodeFree(&self); 
+        .def("__init__", [](yoga::Node *t) {
+            new (t) yoga::Node();
+            nanobindManagedNodes.insert(t);
+            yoga::Event::publish<yoga::Event::NodeAllocation>(t, {YGNodeGetConfig(t)});
         })
-        .def("free", [](yoga::Node& self) { YGNodeFree(&self); })
-        .def("free_recursive", [](yoga::Node& self) { YGNodeFreeRecursive(&self); })
+        .def("__init__", [](yoga::Node *t, yoga::Config* config) {
+            new (t) yoga::Node(config);
+            nanobindManagedNodes.insert(t);
+            yoga::Event::publish<yoga::Event::NodeAllocation>(t, {YGNodeGetConfig(t)});
+        }, nb::arg("config"))
+        .def("__len__", [](yoga::Node& self) { return YGNodeGetChildCount(&self); })
+        .def("__getitem__", [](yoga::Node& self, size_t index) -> yoga::Node* {
+            return static_cast<yoga::Node*>(YGNodeGetChild(&self, index));
+        }, nb::rv_policy::reference_internal)
+        .def("__enter__", [](yoga::Node& self) -> yoga::Node& { return self; },
+            nb::rv_policy::reference)
+        .def("__exit__", [](yoga::Node& self, const nb::object&, const nb::object&, const nb::object&) {
+            safeNodeFree(self);
+        })
+        .def("free", [](yoga::Node& self) { safeNodeFree(self); })
+        .def("free_recursive", [](yoga::Node& self) { safeNodeFreeRecursive(self); })
         .def("reset", [](yoga::Node& self) { YGNodeReset(&self); })
         .def("copy_style", [](yoga::Node& self, const yoga::Node& src) { YGNodeCopyStyle(&self, &src); })
         .def("set_context", [](yoga::Node& self, nb::object context) {
-            auto* oldContext = static_cast<nb::object*>(self.getContext());
-            delete oldContext;
             if (context.is_none()) {
-                self.setContext(nullptr);
+                auto* ctx = getNodeContext(&self);
+                if (ctx) {
+                    ctx->user_context = nb::none();
+                }
             } else {
-                auto* newContext = new nb::object(context);
-                self.setContext(newContext);
+                auto* ctx = getOrCreateNodeContext(&self);
+                ctx->user_context = context;
             }
         })
         .def("get_context", [](yoga::Node& self) -> nb::object {
-            auto* context = static_cast<nb::object*>(self.getContext());
-            if (context) {
-                return nb::object(*context);
+            auto* ctx = getNodeContext(&self);
+            if (ctx && !ctx->user_context.is_none()) {
+                return ctx->user_context;
             }
             return nb::none();
         })
         .def("get_config", [](yoga::Node& self) -> yoga::Config* {
             return static_cast<yoga::Config*>(const_cast<YGConfigRef>(YGNodeGetConfig(&self)));
-        })
+        }, nb::rv_policy::reference)
         .def("set_config", [](yoga::Node& self, yoga::Config& config) {
             YGNodeSetConfig(&self, &config);
         })
         .def("swap_child", [](yoga::Node& self, yoga::Node& child, size_t index) {
             YGNodeSwapChild(&self, &child, index);
         }, nb::arg("child"), nb::arg("index"))
-        .def("clone", [](yoga::Node& self) -> yoga::Node* { 
-            return static_cast<yoga::Node*>(YGNodeClone(&self)); 
-        })
+        .def("clone", [](yoga::Node& self) -> yoga::Node* {
+            return static_cast<yoga::Node*>(YGNodeClone(&self));
+        }, nb::rv_policy::reference)
         .def("calculate_layout", [](yoga::Node& self, float availableWidth, float availableHeight, YGDirection direction) {
             YGNodeCalculateLayout(&self, availableWidth, availableHeight, direction);
-        }, nb::arg("available_width") = YGUndefined, nb::arg("available_height") = YGUndefined, 
+        }, nb::arg("available_width") = YGUndefined, nb::arg("available_height") = YGUndefined,
            nb::arg("direction") = YGDirectionLTR)
-        .def_prop_rw("has_new_layout", 
+        .def_prop_rw("has_new_layout",
             [](yoga::Node& self) { return YGNodeGetHasNewLayout(&self); },
             [](yoga::Node& self, bool value) { YGNodeSetHasNewLayout(&self, value); })
         .def_prop_ro("is_dirty", [](yoga::Node& self) { return YGNodeIsDirty(&self); })
         .def("mark_dirty", [](yoga::Node& self) { YGNodeMarkDirty(&self); })
         .def("mark_dirty_and_propagate", [](yoga::Node& self) { self.markDirtyAndPropagate(); })
-        .def("set_dirty", [](yoga::Node& self, bool value) { 
+        .def("set_dirty", [](yoga::Node& self, bool value) {
             self.setDirty(value);
             YGNodeSetHasNewLayout(&self, value);
         })
@@ -444,8 +558,12 @@ NB_MODULE(yoga, m) {
             }
             return result;
         })
-        .def_prop_ro("owner", [](yoga::Node& self) -> yoga::Node* { return static_cast<yoga::Node*>(YGNodeGetOwner(&self)); })
-        .def_prop_ro("parent", [](yoga::Node& self) -> yoga::Node* { return static_cast<yoga::Node*>(YGNodeGetParent(&self)); })
+        .def_prop_ro("owner", [](yoga::Node& self) -> yoga::Node* {
+            return static_cast<yoga::Node*>(YGNodeGetOwner(&self));
+        }, nb::rv_policy::reference)
+        .def_prop_ro("parent", [](yoga::Node& self) -> yoga::Node* {
+            return static_cast<yoga::Node*>(YGNodeGetParent(&self));
+        }, nb::rv_policy::reference)
         .def_prop_rw("direction",
             [](yoga::Node& self) { return YGNodeStyleGetDirection(&self); },
             [](yoga::Node& self, YGDirection value) { YGNodeStyleSetDirection(&self, value); })
@@ -489,8 +607,8 @@ NB_MODULE(yoga, m) {
             [](yoga::Node& self) { return YGNodeStyleGetFlexShrink(&self); },
             [](yoga::Node& self, float value) { YGNodeStyleSetFlexShrink(&self, value); })
         .def_prop_rw("flex_basis",
-            [](yoga::Node& self) { return YGValueToYGValue(YGNodeStyleGetFlexBasis(&self)); },
-            [](yoga::Node& self, nb::object value) { 
+            [](yoga::Node& self) { return YGNodeStyleGetFlexBasis(&self); },
+            [](yoga::Node& self, nb::object value) {
                 if (nb::isinstance<nb::int_>(value) || nb::isinstance<nb::float_>(value)) {
                     YGNodeStyleSetFlexBasis(&self, nb::cast<float>(value));
                 } else if (nb::isinstance<YGValue>(value)) {
@@ -505,8 +623,8 @@ NB_MODULE(yoga, m) {
                 }
             })
         .def_prop_rw("width",
-            [](yoga::Node& self) { return YGValueToYGValue(YGNodeStyleGetWidth(&self)); },
-            [](yoga::Node& self, nb::object value) { 
+            [](yoga::Node& self) { return YGNodeStyleGetWidth(&self); },
+            [](yoga::Node& self, nb::object value) {
                 if (nb::isinstance<nb::int_>(value) || nb::isinstance<nb::float_>(value)) {
                     YGNodeStyleSetWidth(&self, nb::cast<float>(value));
                 } else if (nb::isinstance<YGValue>(value)) {
@@ -523,8 +641,8 @@ NB_MODULE(yoga, m) {
                 }
             })
         .def_prop_rw("height",
-            [](yoga::Node& self) { return YGValueToYGValue(YGNodeStyleGetHeight(&self)); },
-            [](yoga::Node& self, nb::object value) { 
+            [](yoga::Node& self) { return YGNodeStyleGetHeight(&self); },
+            [](yoga::Node& self, nb::object value) {
                 if (nb::isinstance<nb::int_>(value) || nb::isinstance<nb::float_>(value)) {
                     YGNodeStyleSetHeight(&self, nb::cast<float>(value));
                 } else if (nb::isinstance<YGValue>(value)) {
@@ -540,21 +658,17 @@ NB_MODULE(yoga, m) {
                     YGNodeStyleSetHeight(&self, nb::cast<float>(value));
                 }
             })
-        .def("set_width_percent", [](yoga::Node& self, float value) { YGNodeStyleSetWidthPercent(&self, value); })
-        .def("set_height_percent", [](yoga::Node& self, float value) { YGNodeStyleSetHeightPercent(&self, value); })
-        .def("set_width_auto", [](yoga::Node& self) { YGNodeStyleSetWidthAuto(&self); })
-        .def("set_height_auto", [](yoga::Node& self) { YGNodeStyleSetHeightAuto(&self); })
-        .def("set_margin_auto", [](yoga::Node& self, nb::object edge_obj) { 
+        .def("set_margin_auto", [](yoga::Node& self, nb::object edge_obj) {
             int edge = nb::isinstance<YGEdge>(edge_obj) ? nb::cast<int>(edge_obj.attr("value")) : nb::cast<int>(edge_obj);
-            YGNodeStyleSetMarginAuto(&self, (YGEdge)edge); 
+            YGNodeStyleSetMarginAuto(&self, (YGEdge)edge);
         })
-        .def("set_position_auto", [](yoga::Node& self, nb::object edge_obj) { 
+        .def("set_position_auto", [](yoga::Node& self, nb::object edge_obj) {
             int edge = nb::isinstance<YGEdge>(edge_obj) ? nb::cast<int>(edge_obj.attr("value")) : nb::cast<int>(edge_obj);
-            YGNodeStyleSetPositionAuto(&self, (YGEdge)edge); 
+            YGNodeStyleSetPositionAuto(&self, (YGEdge)edge);
         })
         .def_prop_rw("min_width",
-            [](yoga::Node& self) { return YGValueToYGValue(YGNodeStyleGetMinWidth(&self)); },
-            [](yoga::Node& self, nb::object value) { 
+            [](yoga::Node& self) { return YGNodeStyleGetMinWidth(&self); },
+            [](yoga::Node& self, nb::object value) {
                 if (nb::isinstance<nb::int_>(value) || nb::isinstance<nb::float_>(value)) {
                     YGNodeStyleSetMinWidth(&self, nb::cast<float>(value));
                 } else if (nb::isinstance<YGValue>(value)) {
@@ -569,8 +683,8 @@ NB_MODULE(yoga, m) {
                 }
             })
         .def_prop_rw("min_height",
-            [](yoga::Node& self) { return YGValueToYGValue(YGNodeStyleGetMinHeight(&self)); },
-            [](yoga::Node& self, nb::object value) { 
+            [](yoga::Node& self) { return YGNodeStyleGetMinHeight(&self); },
+            [](yoga::Node& self, nb::object value) {
                 if (nb::isinstance<nb::int_>(value) || nb::isinstance<nb::float_>(value)) {
                     YGNodeStyleSetMinHeight(&self, nb::cast<float>(value));
                 } else if (nb::isinstance<YGValue>(value)) {
@@ -585,8 +699,8 @@ NB_MODULE(yoga, m) {
                 }
             })
         .def_prop_rw("max_width",
-            [](yoga::Node& self) { return YGValueToYGValue(YGNodeStyleGetMaxWidth(&self)); },
-            [](yoga::Node& self, nb::object value) { 
+            [](yoga::Node& self) { return YGNodeStyleGetMaxWidth(&self); },
+            [](yoga::Node& self, nb::object value) {
                 if (nb::isinstance<nb::int_>(value) || nb::isinstance<nb::float_>(value)) {
                     YGNodeStyleSetMaxWidth(&self, nb::cast<float>(value));
                 } else if (nb::isinstance<YGValue>(value)) {
@@ -601,8 +715,8 @@ NB_MODULE(yoga, m) {
                 }
             })
         .def_prop_rw("max_height",
-            [](yoga::Node& self) { return YGValueToYGValue(YGNodeStyleGetMaxHeight(&self)); },
-            [](yoga::Node& self, nb::object value) { 
+            [](yoga::Node& self) { return YGNodeStyleGetMaxHeight(&self); },
+            [](yoga::Node& self, nb::object value) {
                 if (nb::isinstance<nb::int_>(value) || nb::isinstance<nb::float_>(value)) {
                     YGNodeStyleSetMaxHeight(&self, nb::cast<float>(value));
                 } else if (nb::isinstance<YGValue>(value)) {
@@ -629,21 +743,21 @@ NB_MODULE(yoga, m) {
         .def_prop_ro("layout_had_overflow", [](yoga::Node& self) { return YGNodeLayoutGetHadOverflow(&self); })
         .def_prop_ro("layout_raw_width", [](yoga::Node& self) { return YGNodeLayoutGetRawWidth(&self); })
         .def_prop_ro("layout_raw_height", [](yoga::Node& self) { return YGNodeLayoutGetRawHeight(&self); })
-        .def("get_margin", [](yoga::Node& self, nb::object edge_obj) { 
+        .def("get_margin", [](yoga::Node& self, nb::object edge_obj) {
             int edge = nb::isinstance<YGEdge>(edge_obj) ? nb::cast<int>(edge_obj.attr("value")) : nb::cast<int>(edge_obj);
-            return YGValueToYGValue(YGNodeStyleGetMargin(&self, (YGEdge)edge)); 
+            return YGNodeStyleGetMargin(&self, (YGEdge)edge);
         }, nb::arg("edge"))
-        .def("get_padding", [](yoga::Node& self, nb::object edge_obj) { 
+        .def("get_padding", [](yoga::Node& self, nb::object edge_obj) {
             int edge = nb::isinstance<YGEdge>(edge_obj) ? nb::cast<int>(edge_obj.attr("value")) : nb::cast<int>(edge_obj);
-            return YGValueToYGValue(YGNodeStyleGetPadding(&self, (YGEdge)edge)); 
+            return YGNodeStyleGetPadding(&self, (YGEdge)edge);
         }, nb::arg("edge"))
-        .def("get_border", [](yoga::Node& self, nb::object edge_obj) { 
+        .def("get_border", [](yoga::Node& self, nb::object edge_obj) {
             int edge = nb::isinstance<YGEdge>(edge_obj) ? nb::cast<int>(edge_obj.attr("value")) : nb::cast<int>(edge_obj);
-            return YGNodeStyleGetBorder(&self, (YGEdge)edge); 
+            return YGNodeStyleGetBorder(&self, (YGEdge)edge);
         }, nb::arg("edge"))
-        .def("get_position", [](yoga::Node& self, nb::object edge_obj) { 
+        .def("get_position", [](yoga::Node& self, nb::object edge_obj) {
             int edge = nb::isinstance<YGEdge>(edge_obj) ? nb::cast<int>(edge_obj.attr("value")) : nb::cast<int>(edge_obj);
-            return YGValueToYGValue(YGNodeStyleGetPosition(&self, (YGEdge)edge)); 
+            return YGNodeStyleGetPosition(&self, (YGEdge)edge);
         }, nb::arg("edge"))
         .def("set_position", [](yoga::Node& self, nb::object edge_obj, nb::object value) {
             int edge = nb::isinstance<YGEdge>(edge_obj) ? nb::cast<int>(edge_obj.attr("value")) : nb::cast<int>(edge_obj);
@@ -726,44 +840,59 @@ NB_MODULE(yoga, m) {
         .def("remove_child", [](yoga::Node& self, yoga::Node& child) { YGNodeRemoveChild(&self, &child); }, nb::arg("child"))
         .def("remove_all_children", [](yoga::Node& self) { YGNodeRemoveAllChildren(&self); })
         .def("set_children", [](yoga::Node& self, const std::vector<yoga::Node*>& children) {
+            // Clear owner for old children that are owned by self and not in the new list
+            for (size_t i = 0; i < self.getChildCount(); i++) {
+                auto* oldChild = self.getChild(i);
+                if (oldChild->getOwner() == &self) {
+                    bool inNewList = false;
+                    for (auto* newChild : children) {
+                        if (newChild == oldChild) { inNewList = true; break; }
+                    }
+                    if (!inNewList) {
+                        oldChild->setOwner(nullptr);
+                    }
+                }
+            }
             self.setChildren(children);
+            // Only set owner for children that have no owner (unowned).
+            // Children with a different owner are "shared" and keep their
+            // original owner - this enables yoga's clone-on-write mechanism.
+            for (auto* child : children) {
+                if (child->getOwner() == nullptr) {
+                    child->setOwner(&self);
+                }
+            }
             self.markDirtyAndPropagate();
         }, nb::arg("children"))
         .def("set_measure_func", [](yoga::Node& self, nb::object callback) {
-            auto* oldContext = static_cast<MeasureContext*>(self.getContext());
-            delete oldContext;
+            auto* ctx = getOrCreateNodeContext(&self);
             if (callback.is_none()) {
-                self.setContext(nullptr);
+                ctx->measure_callback = nb::none();
                 YGNodeSetMeasureFunc(&self, nullptr);
             } else {
-                auto* context = new MeasureContext{callback};
-                self.setContext(context);
+                ctx->measure_callback = callback;
                 YGNodeSetMeasureFunc(&self, yogaMeasureCallback);
             }
         }, nb::arg("func") = nb::none())
         .def("has_measure_func", [](yoga::Node& self) { return YGNodeHasMeasureFunc(&self); })
         .def("set_baseline_func", [](yoga::Node& self, nb::object callback) {
-            auto* oldContext = static_cast<BaselineContext*>(self.getContext());
-            delete oldContext;
+            auto* ctx = getOrCreateNodeContext(&self);
             if (callback.is_none()) {
-                self.setContext(nullptr);
+                ctx->baseline_callback = nb::none();
                 YGNodeSetBaselineFunc(&self, nullptr);
             } else {
-                auto* context = new BaselineContext{callback};
-                self.setContext(context);
+                ctx->baseline_callback = callback;
                 YGNodeSetBaselineFunc(&self, yogaBaselineCallback);
             }
         }, nb::arg("func") = nb::none())
         .def("has_baseline_func", [](yoga::Node& self) { return YGNodeHasBaselineFunc(&self); })
         .def("set_dirtied_func", [](yoga::Node& self, nb::object callback) {
-            auto* oldContext = static_cast<DirtiedContext*>(self.getContext());
-            delete oldContext;
+            auto* ctx = getOrCreateNodeContext(&self);
             if (callback.is_none()) {
-                self.setContext(nullptr);
+                ctx->dirtied_callback = nb::none();
                 YGNodeSetDirtiedFunc(&self, nullptr);
             } else {
-                auto* context = new DirtiedContext{callback};
-                self.setContext(context);
+                ctx->dirtied_callback = callback;
                 YGNodeSetDirtiedFunc(&self, yogaDirtiedCallback);
             }
         }, nb::arg("func") = nb::none())
@@ -771,13 +900,13 @@ NB_MODULE(yoga, m) {
         .def("measure", [](yoga::Node& self, float width, nb::object widthModeObj, float height, nb::object heightModeObj) -> nb::tuple {
             int widthMode = nb::isinstance<YGMeasureMode>(widthModeObj) ? nb::cast<int>(widthModeObj.attr("value")) : nb::cast<int>(widthModeObj);
             int heightMode = nb::isinstance<YGMeasureMode>(heightModeObj) ? nb::cast<int>(heightModeObj.attr("value")) : nb::cast<int>(heightModeObj);
-            auto* context = static_cast<MeasureContext*>(self.getContext());
-            if (!context || context->callback.is_none()) {
+            auto* ctx = getNodeContext(&self);
+            if (!ctx || ctx->measure_callback.is_none()) {
                 return nb::make_tuple(YGUndefined, YGUndefined);
             }
             nb::gil_scoped_acquire acquire;
             try {
-                nb::object result = context->callback(&self, width, widthMode, height, heightMode);
+                nb::object result = ctx->measure_callback(&self, width, widthMode, height, heightMode);
                 if (nb::isinstance<nb::dict>(result)) {
                     nb::dict d = nb::cast<nb::dict>(result);
                     float w = nb::cast<float>(d["width"]);
@@ -796,13 +925,13 @@ NB_MODULE(yoga, m) {
             return nb::make_tuple(YGUndefined, YGUndefined);
         })
         .def("baseline", [](yoga::Node& self, float width, float height) -> float {
-            auto* context = static_cast<BaselineContext*>(self.getContext());
-            if (!context || context->callback.is_none()) {
+            auto* ctx = getNodeContext(&self);
+            if (!ctx || ctx->baseline_callback.is_none()) {
                 return height;
             }
             nb::gil_scoped_acquire acquire;
             try {
-                return nb::cast<float>(context->callback(&self, width, height));
+                return nb::cast<float>(ctx->baseline_callback(&self, width, height));
             } catch (...) {
             }
             return height;
@@ -866,4 +995,26 @@ NB_MODULE(yoga, m) {
         .def("set_flex_basis_max_content", [](yoga::Node& self) { YGNodeStyleSetFlexBasisMaxContent(&self); })
         .def("set_flex_basis_stretch", [](yoga::Node& self) { YGNodeStyleSetFlexBasisStretch(&self); })
         .def("_node_id", [](yoga::Node& self) -> uintptr_t { return reinterpret_cast<uintptr_t>(&self); });
+
+    // Clean up all Python-side resources during module teardown.
+    // Using a capsule ensures cleanup runs when the module dict is cleared,
+    // before nanobind's leak checker fires.
+    m.attr("_cleanup") = nb::capsule((void*)0x1, [](void*) noexcept {
+        // Reset event subscribers (releases captured Python callbacks)
+        yoga::Event::reset();
+
+        // Clean up any remaining NodeContexts (releases Python callbacks)
+        for (auto* ctx : allNodeContexts) {
+            delete ctx;
+        }
+        allNodeContexts.clear();
+
+        // Clean up any remaining CloneContexts (releases Python callbacks)
+        for (auto* ctx : allCloneContexts) {
+            delete ctx;
+        }
+        allCloneContexts.clear();
+
+        nanobindManagedNodes.clear();
+    });
 }

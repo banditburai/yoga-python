@@ -38,7 +38,6 @@ else()
   add_subdirectory(${yoga_SOURCE_DIR} ${CMAKE_BINARY_DIR}/yoga-build EXCLUDE_FROM_ALL)
 endif()
 
-find_package(nanobind REQUIRED)
 nanobind_add_module(yoga src/yoga/yoga.cpp)
 target_include_directories(yoga PRIVATE ${yoga_SOURCE_DIR})
 target_link_libraries(yoga PRIVATE yogacore)

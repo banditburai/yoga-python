@@ -20,9 +20,6 @@ def recursively_assert_proper_node_ownership(node):
         recursively_assert_proper_node_ownership(child)
 
 
-@pytest.mark.skip(
-    reason="nanobind pytest crash: clone() + free_recursive() causes abort. Works in regular Python."
-)
 class TestCloneNode:
     def test_free_root_only(self):
         config = Config()

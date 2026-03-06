@@ -104,6 +104,7 @@ class TestMeasure:
         measure_counter = MeasureCounter()
 
         root_child0_child0 = Node(config)
+        root_child0_child0.position_type = PositionType.Absolute
         root_child0_child0.set_measure_func(_make_measure(measure_counter))
         root_child0.insert_child(root_child0_child0, 0)
 
