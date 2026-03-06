@@ -24,9 +24,8 @@ from .yoga import (
     YGValue as YGValue,
     YGValuePercent as YGValuePercent,
     YGValuePoint as YGValuePoint,
-    round_value_to_pixel_grid as round_value_to_pixel_grid
+    round_value_to_pixel_grid as round_value_to_pixel_grid,
 )
-
 
 Undefined: yoga.MeasureMode = yoga.MeasureMode.Undefined
 
@@ -88,7 +87,7 @@ Scroll: yoga.Overflow = yoga.Overflow.Scroll
 
 Flex: yoga.Display = yoga.Display.Flex
 
-None: yoga.Display = yoga.Display.None
+None_: yoga.Display = yoga.Display.None_
 
 Left: yoga.Edge = yoga.Edge.Left
 

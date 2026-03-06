@@ -25,6 +25,31 @@ struct CloneContext {
     nb::object callback;
 };
 
+static YGNodeRef yogaCloneNodeCallback(
+    YGNodeConstRef oldNode,
+    YGNodeConstRef owner,
+    size_t childIndex) {
+    YGConfigConstRef config = YGNodeGetConfig(const_cast<YGNodeRef>(oldNode));
+    if (!config) return nullptr;
+    
+    void* ctx = YGConfigGetContext(const_cast<YGConfigRef>(config));
+    if (!ctx) return nullptr;
+    
+    auto* context = static_cast<CloneContext*>(ctx);
+    if (context->callback.is_none()) return nullptr;
+    
+    nb::gil_scoped_acquire acquire;
+    try {
+        yoga::Node* oldNodePtr = const_cast<yoga::Node*>(reinterpret_cast<const yoga::Node*>(oldNode));
+        yoga::Node* ownerPtr = const_cast<yoga::Node*>(reinterpret_cast<const yoga::Node*>(owner));
+        nb::object result = context->callback(oldNodePtr, ownerPtr, childIndex);
+        if (result.is_none()) return nullptr;
+        return static_cast<yoga::Node*>(nb::cast<yoga::Node*>(result));
+    } catch (...) {
+        return nullptr;
+    }
+}
+
 static int yogaLogger(
     YGConfigConstRef config,
     YGNodeConstRef node,
@@ -59,6 +84,13 @@ static YGSize yogaMeasureCallback(
             float w = nb::cast<float>(d["width"]);
             float h = nb::cast<float>(d["height"]);
             return YGSize{w, h};
+        } else if (nb::isinstance<nb::tuple>(result)) {
+            nb::tuple t = nb::cast<nb::tuple>(result);
+            if (nb::len(t) >= 2) {
+                float w = nb::cast<float>(t[0]);
+                float h = nb::cast<float>(t[1]);
+                return YGSize{w, h};
+            }
         }
     } catch (...) {
     }
@@ -100,7 +132,7 @@ static YGValue YGValueToYGValue(YGValue v) {
 }
 
 NB_MODULE(yoga, m) {
-    m.doc() = "Python binding for Facebook Yoga layout engine";
+    m.doc() = "Python binding for Facebook Yoga layout engine (using nanobind)";
 
     nb::enum_<YGDirection>(m, "Direction")
         .value("Inherit", YGDirectionInherit)
@@ -222,16 +254,60 @@ NB_MODULE(yoga, m) {
         .value("Column", YGGutterColumn)
         .export_values();
 
+    nb::enum_<YGDimension>(m, "Dimension")
+        .value("Width", YGDimensionWidth)
+        .value("Height", YGDimensionHeight)
+        .export_values();
+
+    nb::enum_<YGNodeType>(m, "NodeType")
+        .value("Default", YGNodeTypeDefault)
+        .value("Text", YGNodeTypeText)
+        .export_values();
+
+    nb::enum_<YGLogLevel>(m, "LogLevel")
+        .value("Error", YGLogLevelError)
+        .value("Warn", YGLogLevelWarn)
+        .value("Info", YGLogLevelInfo)
+        .value("Debug", YGLogLevelDebug)
+        .value("Verbose", YGLogLevelVerbose)
+        .value("Fatal", YGLogLevelFatal)
+        .export_values();
+
     nb::class_<YGValue>(m, "YGValue")
         .def(nb::init<float, YGUnit>())
         .def_prop_rw("value", [](YGValue& self) { return self.value; },
                        [](YGValue& self, float v) { self.value = v; })
         .def_prop_rw("unit", [](YGValue& self) { return self.unit; },
-                       [](YGValue& self, YGUnit u) { self.unit = u; });
+                       [](YGValue& self, YGUnit u) { self.unit = u; })
+        .def("__repr__", [](const YGValue& v) {
+            std::string unit_str;
+            switch(v.unit) {
+                case YGUnitUndefined: unit_str = "Undefined"; break;
+                case YGUnitPoint: unit_str = "Point"; break;
+                case YGUnitPercent: unit_str = "Percent"; break;
+                case YGUnitAuto: unit_str = "Auto"; break;
+                case YGUnitMaxContent: unit_str = "MaxContent"; break;
+                case YGUnitFitContent: unit_str = "FitContent"; break;
+                case YGUnitStretch: unit_str = "Stretch"; break;
+                default: unit_str = "Unknown"; break;
+            }
+            return "YGValue(" + std::to_string(v.value) + ", " + unit_str + ")";
+        })
+        .def("__eq__", [](const YGValue& a, const YGValue& b) {
+            if (a.unit != b.unit) return false;
+            if (a.unit == YGUnitUndefined || a.unit == YGUnitAuto ||
+                a.unit == YGUnitMaxContent || a.unit == YGUnitFitContent ||
+                a.unit == YGUnitStretch) return true;
+            return a.value == b.value;
+        })
+        .def("__neg__", [](const YGValue& v) {
+            return YGValue(-v.value, v.unit);
+        });
 
     m.attr("YGValueAuto") = YGValue(0, YGUnitAuto);
     m.attr("YGValueUndefined") = YGValue(0, YGUnitUndefined);
     m.attr("YGValueZero") = YGValue(0, YGUnitPoint);
+    m.attr("YGValueFitContent") = YGValue(0, YGUnitFitContent);
     m.def("YGValuePoint", [](float v) { return YGValue(v, YGUnitPoint); });
     m.def("YGValuePercent", [](float v) { return YGValue(v, YGUnitPercent); });
     m.def("YGFloatIsUndefined", [](float v) { return std::isnan(v); });
@@ -271,10 +347,15 @@ NB_MODULE(yoga, m) {
             [](yoga::Config& self) { return YGConfigGetErrata(&self); },
             [](yoga::Config& self, YGErrata value) { YGConfigSetErrata(&self, value); })
         .def("set_clone_node_callback", [](yoga::Config& self, nb::object callback) {
+            auto* oldContext = static_cast<CloneContext*>(YGConfigGetContext(&self));
+            delete oldContext;
             if (callback.is_none()) {
                 self.setCloneNodeCallback(nullptr);
+                YGConfigSetContext(&self, nullptr);
             } else {
-                self.setCloneNodeCallback(nullptr);
+                auto* context = new CloneContext{callback};
+                self.setCloneNodeCallback(yogaCloneNodeCallback);
+                YGConfigSetContext(&self, context);
             }
         })
         .def("clone_node", [](yoga::Config& self, yoga::Node& node, yoga::Node* owner, size_t childIndex) -> yoga::Node* {
@@ -617,6 +698,8 @@ NB_MODULE(yoga, m) {
             self.markDirtyAndPropagate();
         }, nb::arg("children"))
         .def("set_measure_func", [](yoga::Node& self, nb::object callback) {
+            auto* oldContext = static_cast<MeasureContext*>(self.getContext());
+            delete oldContext;
             if (callback.is_none()) {
                 self.setContext(nullptr);
                 YGNodeSetMeasureFunc(&self, nullptr);
@@ -628,6 +711,8 @@ NB_MODULE(yoga, m) {
         }, nb::arg("func") = nb::none())
         .def("has_measure_func", [](yoga::Node& self) { return YGNodeHasMeasureFunc(&self); })
         .def("set_baseline_func", [](yoga::Node& self, nb::object callback) {
+            auto* oldContext = static_cast<BaselineContext*>(self.getContext());
+            delete oldContext;
             if (callback.is_none()) {
                 self.setContext(nullptr);
                 YGNodeSetBaselineFunc(&self, nullptr);
@@ -639,6 +724,8 @@ NB_MODULE(yoga, m) {
         }, nb::arg("func") = nb::none())
         .def("has_baseline_func", [](yoga::Node& self) { return YGNodeHasBaselineFunc(&self); })
         .def("set_dirtied_func", [](yoga::Node& self, nb::object callback) {
+            auto* oldContext = static_cast<DirtiedContext*>(self.getContext());
+            delete oldContext;
             if (callback.is_none()) {
                 self.setContext(nullptr);
                 YGNodeSetDirtiedFunc(&self, nullptr);
@@ -664,6 +751,13 @@ NB_MODULE(yoga, m) {
                     float w = nb::cast<float>(d["width"]);
                     float h = nb::cast<float>(d["height"]);
                     return nb::make_tuple(w, h);
+                } else if (nb::isinstance<nb::tuple>(result)) {
+                    nb::tuple t = nb::cast<nb::tuple>(result);
+                    if (nb::len(t) >= 2) {
+                        float w = nb::cast<float>(t[0]);
+                        float h = nb::cast<float>(t[1]);
+                        return nb::make_tuple(w, h);
+                    }
                 }
             } catch (...) {
             }
@@ -681,9 +775,15 @@ NB_MODULE(yoga, m) {
             }
             return height;
         })
+        .def_prop_rw("node_type",
+            [](yoga::Node& self) { return YGNodeGetNodeType(&self); },
+            [](yoga::Node& self, YGNodeType value) { YGNodeSetNodeType(&self, value); })
         .def_prop_rw("is_reference_baseline",
             [](yoga::Node& self) { return YGNodeIsReferenceBaseline(&self); },
             [](yoga::Node& self, bool value) { YGNodeSetIsReferenceBaseline(&self, value); })
+        .def_prop_rw("always_forms_containing_block",
+            [](yoga::Node& self) { return YGNodeGetAlwaysFormsContainingBlock(&self); },
+            [](yoga::Node& self, bool value) { YGNodeSetAlwaysFormsContainingBlock(&self, value); })
         .def("set_margin_percent", [](yoga::Node& self, nb::object edge_obj, float value) {
             int edge = nb::isinstance<YGEdge>(edge_obj) ? nb::cast<int>(edge_obj.attr("value")) : nb::cast<int>(edge_obj);
             YGNodeStyleSetMarginPercent(&self, (YGEdge)edge, value);
@@ -704,5 +804,34 @@ NB_MODULE(yoga, m) {
             int edge = nb::isinstance<YGEdge>(edge_obj) ? nb::cast<int>(edge_obj.attr("value")) : nb::cast<int>(edge_obj);
             return YGNodeLayoutGetBorder(&self, (YGEdge)edge);
         }, nb::arg("edge"))
+        .def("set_width_auto", [](yoga::Node& self) { YGNodeStyleSetWidthAuto(&self); })
+        .def("set_width_percent", [](yoga::Node& self, float value) { YGNodeStyleSetWidthPercent(&self, value); })
+        .def("set_width_fit_content", [](yoga::Node& self) { YGNodeStyleSetWidthFitContent(&self); })
+        .def("set_width_max_content", [](yoga::Node& self) { YGNodeStyleSetWidthMaxContent(&self); })
+        .def("set_width_stretch", [](yoga::Node& self) { YGNodeStyleSetWidthStretch(&self); })
+        .def("set_height_auto", [](yoga::Node& self) { YGNodeStyleSetHeightAuto(&self); })
+        .def("set_height_percent", [](yoga::Node& self, float value) { YGNodeStyleSetHeightPercent(&self, value); })
+        .def("set_height_fit_content", [](yoga::Node& self) { YGNodeStyleSetHeightFitContent(&self); })
+        .def("set_height_max_content", [](yoga::Node& self) { YGNodeStyleSetHeightMaxContent(&self); })
+        .def("set_height_stretch", [](yoga::Node& self) { YGNodeStyleSetHeightStretch(&self); })
+        .def("set_min_width_percent", [](yoga::Node& self, float value) { YGNodeStyleSetMinWidthPercent(&self, value); })
+        .def("set_min_width_fit_content", [](yoga::Node& self) { YGNodeStyleSetMinWidthFitContent(&self); })
+        .def("set_min_width_max_content", [](yoga::Node& self) { YGNodeStyleSetMinWidthMaxContent(&self); })
+        .def("set_min_width_stretch", [](yoga::Node& self) { YGNodeStyleSetMinWidthStretch(&self); })
+        .def("set_min_height_percent", [](yoga::Node& self, float value) { YGNodeStyleSetMinHeightPercent(&self, value); })
+        .def("set_min_height_fit_content", [](yoga::Node& self) { YGNodeStyleSetMinHeightFitContent(&self); })
+        .def("set_min_height_max_content", [](yoga::Node& self) { YGNodeStyleSetMinHeightMaxContent(&self); })
+        .def("set_min_height_stretch", [](yoga::Node& self) { YGNodeStyleSetMinHeightStretch(&self); })
+        .def("set_max_width_percent", [](yoga::Node& self, float value) { YGNodeStyleSetMaxWidthPercent(&self, value); })
+        .def("set_max_width_fit_content", [](yoga::Node& self) { YGNodeStyleSetMaxWidthFitContent(&self); })
+        .def("set_max_width_max_content", [](yoga::Node& self) { YGNodeStyleSetMaxWidthMaxContent(&self); })
+        .def("set_max_width_stretch", [](yoga::Node& self) { YGNodeStyleSetMaxWidthStretch(&self); })
+        .def("set_max_height_percent", [](yoga::Node& self, float value) { YGNodeStyleSetMaxHeightPercent(&self, value); })
+        .def("set_max_height_fit_content", [](yoga::Node& self) { YGNodeStyleSetMaxHeightFitContent(&self); })
+        .def("set_max_height_max_content", [](yoga::Node& self) { YGNodeStyleSetMaxHeightMaxContent(&self); })
+        .def("set_max_height_stretch", [](yoga::Node& self) { YGNodeStyleSetMaxHeightStretch(&self); })
+        .def("set_flex_basis_fit_content", [](yoga::Node& self) { YGNodeStyleSetFlexBasisFitContent(&self); })
+        .def("set_flex_basis_max_content", [](yoga::Node& self) { YGNodeStyleSetFlexBasisMaxContent(&self); })
+        .def("set_flex_basis_stretch", [](yoga::Node& self) { YGNodeStyleSetFlexBasisStretch(&self); })
         .def("_node_id", [](yoga::Node& self) -> uintptr_t { return reinterpret_cast<uintptr_t>(&self); });
 }
