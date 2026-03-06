@@ -8,7 +8,7 @@ endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-find_package(Python COMPONENTS Interpreter Development REQUIRED)
+find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(nanobind REQUIRED)
 
 set(yoga_BUILD_TESTS OFF CACHE BOOL "Build Yoga tests" FORCE)
