@@ -52,3 +52,20 @@ jobs:
     steps:
       - name: All quality checks passed
         run: echo "✅ All quality checks passed!"
+
+  # Verify release build path (sdist + one Linux wheel) on main so we catch breakage before tagging
+  release-build-smoke:
+    name: Release build (sdist + Linux wheel)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist
+        run: pip install -q build validate-pyproject && validate-pyproject pyproject.toml && python -m build --sdist
+      - name: Build one Linux wheel (cibuildwheel smoke)
+        uses: pypa/cibuildwheel@v2.20.0
+        env:
+          CIBW_BUILD: "cp312-*"
+          CIBW_SKIP: "*-win* *-macos* *-manylinux_i686 *-musllinux_*"
+      - name: List artifacts
+        run: ls -la wheelhouse/ dist/
