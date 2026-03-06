@@ -8,14 +8,14 @@ endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(PYBIND11_FINDPYTHON ON)
+find_package(Python COMPONENTS Interpreter Development REQUIRED)
+find_package(nanobind REQUIRED)
 
 set(yoga_BUILD_TESTS OFF CACHE BOOL "Build Yoga tests" FORCE)
 
 # Use local reference yoga if present, otherwise fetch from GitHub
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/reference/yoga/CMakeLists.txt)
   message(STATUS "Using local reference yoga")
-  find_package(pybind11 REQUIRED)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/reference/yoga ${CMAKE_BINARY_DIR}/yoga-build EXCLUDE_FROM_ALL)
 else()
   message(STATUS "Fetching yoga from GitHub...")
@@ -38,8 +38,8 @@ else()
   add_subdirectory(${yoga_SOURCE_DIR} ${CMAKE_BINARY_DIR}/yoga-build EXCLUDE_FROM_ALL)
 endif()
 
-find_package(pybind11 REQUIRED)
-pybind11_add_module(yoga src/yoga/yoga.cpp)
+find_package(nanobind REQUIRED)
+nanobind_add_module(yoga src/yoga/yoga.cpp)
 target_include_directories(yoga PRIVATE ${yoga_SOURCE_DIR})
 target_link_libraries(yoga PRIVATE yogacore)
 
