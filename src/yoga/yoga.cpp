@@ -47,7 +47,13 @@ static YGSize yogaMeasureCallback(
     }
     nb::gil_scoped_acquire acquire;
     try {
-        nb::object result = context->callback(nodePtr, width, (int)widthMode, height, (int)heightMode);
+        nb::object result = context->callback(
+            nodePtr, 
+            width, 
+            nb::cast(widthMode), 
+            height, 
+            nb::cast(heightMode)
+        );
         if (nb::isinstance<nb::dict>(result)) {
             nb::dict d = nb::cast<nb::dict>(result);
             float w = nb::cast<float>(d["width"]);
@@ -630,11 +636,7 @@ NB_MODULE(yoga, m) {
                 self.setContext(context);
                 YGNodeSetBaselineFunc(&self, yogaBaselineCallback);
             }
-        })
-        .def("set_baseline_func", [](yoga::Node& self) {
-            self.setContext(nullptr);
-            YGNodeSetBaselineFunc(&self, nullptr);
-        })
+        }, nb::arg("func") = nb::none())
         .def("has_baseline_func", [](yoga::Node& self) { return YGNodeHasBaselineFunc(&self); })
         .def("set_dirtied_func", [](yoga::Node& self, nb::object callback) {
             if (callback.is_none()) {
@@ -645,11 +647,7 @@ NB_MODULE(yoga, m) {
                 self.setContext(context);
                 YGNodeSetDirtiedFunc(&self, yogaDirtiedCallback);
             }
-        })
-        .def("set_dirtied_func", [](yoga::Node& self) {
-            self.setContext(nullptr);
-            YGNodeSetDirtiedFunc(&self, nullptr);
-        })
+        }, nb::arg("func") = nb::none())
         .def("has_dirtied_func", [](yoga::Node& self) { return YGNodeGetDirtiedFunc(&self) != nullptr; })
         .def("measure", [](yoga::Node& self, float width, nb::object widthModeObj, float height, nb::object heightModeObj) -> nb::tuple {
             int widthMode = nb::isinstance<YGMeasureMode>(widthModeObj) ? nb::cast<int>(widthModeObj.attr("value")) : nb::cast<int>(widthModeObj);
