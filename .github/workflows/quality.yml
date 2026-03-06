@@ -67,7 +67,9 @@ jobs:
         env:
           CIBW_BUILD: "cp312-*"
           CIBW_SKIP: "*-win* *-macos* *-manylinux_i686 *-musllinux_*"
-          # CMake FetchContent clones Yoga from GitHub; manylinux image has no git
           CIBW_BEFORE_ALL_LINUX: "yum install -y git"
+          CIBW_BUILD_VERBOSITY: "3"
+          CIBW_ENVIRONMENT_PASS_LINUX: "GIT_TERMINAL_PROMPT"
+          GIT_TERMINAL_PROMPT: "0"
       - name: List artifacts
         run: ls -la wheelhouse/ dist/
