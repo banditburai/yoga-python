@@ -247,3 +247,6 @@ class TestPersistence:
         assert secondChild.owner is root1
         assert secondChild[0] is not root0_child0[0]
         assert secondChild[0].owner is secondChild
+
+        root0.free_recursive()
+        root1.free_recursive()

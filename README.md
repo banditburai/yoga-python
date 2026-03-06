@@ -2,7 +2,7 @@
 
 Python bindings for [Facebook's Yoga](https://github.com/facebook/yoga) layout engine — a cross-platform implementation of [CSS Flexbox](https://www.w3.org/TR/css-flexbox-1/).
 
-Yoga computes a layout tree of nodes with flexbox styles and outputs pixel-perfect positions. This package wraps the full C++ engine via [pybind11](https://github.com/pybind/pybind11), giving you the same layout behavior you get in React Native, Litho, and other Yoga-backed frameworks — directly from Python.
+Yoga computes a layout tree of nodes with flexbox styles and outputs pixel-perfect positions. This package wraps the full C++ engine via [nanobind](https://github.com/wjakob/nanobind), giving you the same layout behavior you get in React Native, Litho, and other Yoga-backed frameworks — directly from Python.
 
 ## Installation
 
@@ -10,10 +10,10 @@ Yoga computes a layout tree of nodes with flexbox styles and outputs pixel-perfe
 pip install yoga-python
 ```
 
-Building from source requires a C++20 compiler, CMake 3.15+, and pybind11:
+Building from source requires a C++20 compiler, CMake 3.15+, and nanobind:
 
 ```bash
-pip install scikit-build-core pybind11
+pip install scikit-build-core nanobind
 pip install .
 ```
 
@@ -159,7 +159,7 @@ YGValueUndefined        # undefined
 
 ## Enums
 
-All Yoga enums are available as Python enum types (pybind11 enums, int-convertible):
+All Yoga enums are available as Python enum types (nanobind enums, int-convertible):
 
 `Direction`, `FlexDirection`, `Justify`, `Align`, `PositionType`, `Wrap`, `Overflow`, `Display`, `Edge`, `Unit`, `MeasureMode`, `Dimension`, `BoxSizing`, `Gutter`, `Errata`, `NodeType`, `LogLevel`, `ExperimentalFeature`
 

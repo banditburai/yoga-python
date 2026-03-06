@@ -1,20 +1,38 @@
 [project]
 name = "yoga-python"
 version = "0.1.1"
-description = "Python binding for Facebook Yoga layout engine"
+description = "Python bindings for Facebook Yoga layout engine (CSS Flexbox)"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = []
+keywords = ["yoga", "flexbox", "layout", "css", "react-native"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: C++",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/banditburai/yoga-python"
+Repository = "https://github.com/banditburai/yoga-python"
+Issues = "https://github.com/banditburai/yoga-python/issues"
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=4.1",
     "ruff>=0.3",
+    "pyright>=1.1.408",
 ]
 
 [build-system]
-requires = ["scikit-build-core>=0.5", "pybind11>=2.12"]
+requires = ["scikit-build-core>=0.5", "nanobind>=2.0"]
 build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
@@ -76,7 +94,6 @@ ignore = [
 "tests/archive/*.py" = ["F401", "I001", "PLR0915", "E712", "N803", "PLW1641", "F811", "PLR0913"]
 "src/yoga/__init__.py" = ["F401", "I001", "SIM105"]
 "src/yoga/__init__.pyi" = ["N815"]
-"src/yoga/value.py" = ["I001", "PLW1641"]
 "tests/conftest.py" = ["F401", "I001"]
 
 [tool.ruff.format]
@@ -86,4 +103,7 @@ indent-style = "space"
 [dependency-groups]
 dev = [
     "pyright>=1.1.408",
+    "pytest>=8.0",
+    "pytest-cov>=4.1",
+    "ruff>=0.3",
 ]

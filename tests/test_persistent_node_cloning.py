@@ -115,3 +115,6 @@ class TestPersistentNodeCloning:
         aPrime.calculate_layout(100, 100, Direction.LTR)
 
         assert len(nodes_cloned) == 1
+
+        a.free_recursive()
+        aPrime.free_recursive()

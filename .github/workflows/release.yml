@@ -43,6 +43,13 @@ jobs:
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           # CMake FetchContent clones Yoga from GitHub (dnf for manylinux_2_28)
           CIBW_BEFORE_ALL_LINUX: "dnf install -y git"
+          # Test built wheels before shipping
+          CIBW_TEST_REQUIRES: "pytest"
+          CIBW_TEST_COMMAND: "pytest {project}/tests -v --tb=short -x"
+          # Prevent git from hanging on auth prompts during FetchContent
+          CIBW_ENVIRONMENT_PASS_LINUX: "GIT_TERMINAL_PROMPT"
+          GIT_TERMINAL_PROMPT: "0"
+          CIBW_BUILD_VERBOSITY: "1"
 
       - uses: actions/upload-artifact@v4
         with:
