@@ -63,7 +63,7 @@ jobs:
       - name: Build sdist
         run: pip install -q build validate-pyproject && validate-pyproject pyproject.toml && python -m build --sdist
       - name: Build one Linux wheel (cibuildwheel smoke)
-        uses: pypa/cibuildwheel@v2.20.0
+        uses: pypa/cibuildwheel@v2.22.0
         env:
           CIBW_BUILD: "cp312-*"
           CIBW_SKIP: "*-win* *-macos* *-manylinux_i686 *-musllinux_*"
