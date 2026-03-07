@@ -1,6 +1,7 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/vector.h>
 
+#include <string>
 #include <unordered_set>
 
 #include <yoga/Yoga.h>
