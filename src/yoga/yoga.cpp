@@ -1158,7 +1158,7 @@ NB_MODULE(yoga, m) {
         #define CACHE_CHECK(slot, obj) \
             if (obj.ptr() == cache.ptrs[slot]) goto skip_##slot; \
             cache.ptrs[slot] = obj.ptr();
-        #define CACHE_SKIP(slot) skip_##slot:
+        #define CACHE_SKIP(slot) skip_##slot: (void)0;
 
         // ── Dimensions (width/height: None → auto) ──
         float val;
