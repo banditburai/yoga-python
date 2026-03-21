@@ -1,7 +1,10 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/vector.h>
+#include <nanobind/stl/string.h>
 
+#include <cmath>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <yoga/Yoga.h>
@@ -11,6 +14,58 @@
 
 namespace nb = nanobind;
 namespace yoga = facebook::yoga;
+
+// Interned Python strings for fast pointer comparison in configure_node_fast().
+// Initialized in NB_MODULE; pointer compare is ~10x faster than nb::cast<std::string>.
+namespace interned {
+    static PyObject* row = nullptr;
+    static PyObject* column = nullptr;
+    static PyObject* column_reverse = nullptr;
+    static PyObject* row_reverse = nullptr;
+    static PyObject* wrap = nullptr;
+    static PyObject* wrap_reverse = nullptr;
+    static PyObject* nowrap = nullptr;
+    static PyObject* flex_start = nullptr;
+    static PyObject* flex_end = nullptr;
+    static PyObject* center = nullptr;
+    static PyObject* space_between = nullptr;
+    static PyObject* space_around = nullptr;
+    static PyObject* space_evenly = nullptr;
+    static PyObject* stretch = nullptr;
+    static PyObject* baseline = nullptr;
+    static PyObject* auto_ = nullptr;
+    static PyObject* visible = nullptr;
+    static PyObject* hidden = nullptr;
+    static PyObject* scroll = nullptr;
+    static PyObject* relative = nullptr;
+    static PyObject* absolute = nullptr;
+    static PyObject* static_ = nullptr;
+
+    static void init() {
+        row = PyUnicode_InternFromString("row");
+        column = PyUnicode_InternFromString("column");
+        column_reverse = PyUnicode_InternFromString("column-reverse");
+        row_reverse = PyUnicode_InternFromString("row-reverse");
+        wrap = PyUnicode_InternFromString("wrap");
+        wrap_reverse = PyUnicode_InternFromString("wrap-reverse");
+        nowrap = PyUnicode_InternFromString("nowrap");
+        flex_start = PyUnicode_InternFromString("flex-start");
+        flex_end = PyUnicode_InternFromString("flex-end");
+        center = PyUnicode_InternFromString("center");
+        space_between = PyUnicode_InternFromString("space-between");
+        space_around = PyUnicode_InternFromString("space-around");
+        space_evenly = PyUnicode_InternFromString("space-evenly");
+        stretch = PyUnicode_InternFromString("stretch");
+        baseline = PyUnicode_InternFromString("baseline");
+        auto_ = PyUnicode_InternFromString("auto");
+        visible = PyUnicode_InternFromString("visible");
+        hidden = PyUnicode_InternFromString("hidden");
+        scroll = PyUnicode_InternFromString("scroll");
+        relative = PyUnicode_InternFromString("relative");
+        absolute = PyUnicode_InternFromString("absolute");
+        static_ = PyUnicode_InternFromString("static");
+    }
+}
 
 // Unified context for all node callbacks + user context.
 // Stored in node->getContext() as a single allocation.
@@ -36,6 +91,27 @@ static std::unordered_set<yoga::Node*> nanobindManagedNodes;
 // so we clean up all remaining contexts in the module cleanup capsule.
 static std::unordered_set<NodeContext*> allNodeContexts;
 static std::unordered_set<CloneContext*> allCloneContexts;
+
+// Per-node field cache for configure_node_fast.
+// Caches previous PyObject* pointers and float values per yoga::Node.
+// On each configure call, fields are compared by pointer identity first;
+// yoga setters are only called when the value actually changed.
+enum CacheSlot : int {
+    CS_WIDTH=0, CS_HEIGHT, CS_MIN_WIDTH, CS_MIN_HEIGHT,
+    CS_MAX_WIDTH, CS_MAX_HEIGHT,
+    CS_FLEX_GROW, CS_FLEX_SHRINK, CS_FLEX_BASIS,
+    CS_FLEX_DIRECTION, CS_FLEX_WRAP,
+    CS_JUSTIFY_CONTENT, CS_ALIGN_ITEMS, CS_ALIGN_SELF,
+    CS_GAP, CS_OVERFLOW, CS_POSITION_TYPE,
+    CS_MARGIN, CS_MARGIN_TOP, CS_MARGIN_RIGHT, CS_MARGIN_BOTTOM, CS_MARGIN_LEFT,
+    CS_POS_TOP, CS_POS_RIGHT, CS_POS_BOTTOM, CS_POS_LEFT,
+    CS_COUNT  // = 26
+};
+struct NodeCache {
+    PyObject* ptrs[CS_COUNT] = {};
+    float padding[4] = {-1.f, -1.f, -1.f, -1.f};  // TRBL
+};
+static std::unordered_map<yoga::Node*, NodeCache> node_cache_;
 
 // --- NodeContext helpers ---
 
@@ -74,6 +150,9 @@ static void cleanupCloneContext(yoga::Config& config) {
 // --- Safe free functions ---
 
 static void safeNodeFree(yoga::Node& self) {
+    // Evict from configure_node_fast cache
+    node_cache_.erase(&self);
+
     // Clean up Python context
     cleanupNodeContext(&self);
 
@@ -226,6 +305,9 @@ static void yogaDirtiedCallback(YGNodeConstRef node) {
 
 NB_MODULE(yoga, m) {
     m.doc() = "Python binding for Facebook Yoga layout engine (using nanobind)";
+
+    // Initialize interned strings for fast pointer comparison
+    interned::init();
 
     nb::enum_<YGDirection>(m, "Direction")
         .value("Inherit", YGDirectionInherit)
@@ -841,17 +923,27 @@ NB_MODULE(yoga, m) {
         .def("remove_child", [](yoga::Node& self, yoga::Node& child) { YGNodeRemoveChild(&self, &child); }, nb::arg("child"))
         .def("remove_all_children", [](yoga::Node& self) { YGNodeRemoveAllChildren(&self); })
         .def("set_children", [](yoga::Node& self, const std::vector<yoga::Node*>& children) {
+            const size_t currentCount = self.getChildCount();
+            if (currentCount == children.size()) {
+                bool identical = true;
+                for (size_t i = 0; i < currentCount; i++) {
+                    if (self.getChild(i) != children[i]) {
+                        identical = false;
+                        break;
+                    }
+                }
+                if (identical) {
+                    return;
+                }
+            }
+
+            std::unordered_set<yoga::Node*> nextChildren(children.begin(), children.end());
+
             // Clear owner for old children that are owned by self and not in the new list
-            for (size_t i = 0; i < self.getChildCount(); i++) {
+            for (size_t i = 0; i < currentCount; i++) {
                 auto* oldChild = self.getChild(i);
-                if (oldChild->getOwner() == &self) {
-                    bool inNewList = false;
-                    for (auto* newChild : children) {
-                        if (newChild == oldChild) { inNewList = true; break; }
-                    }
-                    if (!inNewList) {
-                        oldChild->setOwner(nullptr);
-                    }
+                if (oldChild->getOwner() == &self && !nextChildren.contains(oldChild)) {
+                    oldChild->setOwner(nullptr);
                 }
             }
             self.setChildren(children);
@@ -997,6 +1089,562 @@ NB_MODULE(yoga, m) {
         .def("set_flex_basis_stretch", [](yoga::Node& self) { YGNodeStyleSetFlexBasisStretch(&self); })
         .def("_node_id", [](yoga::Node& self) -> uintptr_t { return reinterpret_cast<uintptr_t>(&self); });
 
+    // ── configure_node_fast: bulk yoga configuration in one C++ call ──
+    //
+    // Replaces ~6 individual Python→C++ calls + 24 Python None-checks with
+    // a single call. All dimension parsing, enum mapping, and None handling
+    // happens in C++. Field-level caching skips unchanged properties.
+    //
+    // Dimension args: None=auto/skip, int/float=point, str "50%"=percent, str "auto"=auto
+    // Enum args: None=skip, str=mapped to yoga enum
+    // Numeric args: None=skip, int/float=applied directly
+    // Padding: always applied (float, includes caller's border offset)
+
+    m.def("configure_node_fast", [](
+        yoga::Node& node,
+        // Dimensions
+        nb::object width, nb::object height,
+        nb::object min_width, nb::object min_height,
+        nb::object max_width, nb::object max_height,
+        // Flex
+        nb::object flex_grow, nb::object flex_shrink, nb::object flex_basis,
+        // Enums (None = skip)
+        nb::object flex_direction, nb::object flex_wrap,
+        nb::object justify_content, nb::object align_items, nb::object align_self,
+        // Gap, overflow, position, display
+        nb::object gap, nb::object overflow, nb::object position_type,
+        // Padding (always set, includes border offset from caller)
+        float padding_top, float padding_right,
+        float padding_bottom, float padding_left,
+        // Margin
+        nb::object margin, nb::object margin_top, nb::object margin_right,
+        nb::object margin_bottom, nb::object margin_left,
+        // Position edges
+        nb::object pos_top, nb::object pos_right,
+        nb::object pos_bottom, nb::object pos_left
+    ) {
+        // ── Helper lambdas ──
+
+        // Parse dimension: returns (value, unit) where unit is 0=auto, 1=point, 2=percent
+        auto parse_dim = [](nb::handle obj, float& out_val) -> int {
+            if (obj.is_none()) return 0;  // auto/unset
+            if (nb::isinstance<nb::int_>(obj) || nb::isinstance<nb::float_>(obj)) {
+                out_val = nb::cast<float>(obj);
+                return 1;  // point
+            }
+            if (nb::isinstance<nb::str>(obj)) {
+                std::string s = nb::cast<std::string>(obj);
+                if (s == "auto") return 0;
+                try {
+                    if (!s.empty() && s.back() == '%') {
+                        s.pop_back();
+                        out_val = std::stof(s);
+                        return 2;  // percent
+                    }
+                    out_val = std::stof(s);
+                    return 1;  // point
+                } catch (const std::exception&) {
+                    return 0;  // malformed string → treat as auto/unset
+                }
+            }
+            return 0;
+        };
+
+        // ── Field-level cache: skip unchanged yoga setter calls ──
+        auto& cache = node_cache_[&node];
+
+        // Macro: skip if PyObject* identity unchanged (most common case for
+        // interned strings and small ints which Python caches globally)
+        #define CACHE_CHECK(slot, obj) \
+            if (obj.ptr() == cache.ptrs[slot]) goto skip_##slot; \
+            cache.ptrs[slot] = obj.ptr();
+        #define CACHE_SKIP(slot) skip_##slot:
+
+        // ── Dimensions (width/height: None → auto) ──
+        float val;
+        int unit;
+
+        CACHE_CHECK(CS_WIDTH, width)
+        unit = parse_dim(width, val);
+        if (unit == 1) YGNodeStyleSetWidth(&node, val);
+        else if (unit == 2) YGNodeStyleSetWidthPercent(&node, val);
+        else YGNodeStyleSetWidthAuto(&node);
+        CACHE_SKIP(CS_WIDTH)
+
+        CACHE_CHECK(CS_HEIGHT, height)
+        unit = parse_dim(height, val);
+        if (unit == 1) YGNodeStyleSetHeight(&node, val);
+        else if (unit == 2) YGNodeStyleSetHeightPercent(&node, val);
+        else YGNodeStyleSetHeightAuto(&node);
+        CACHE_SKIP(CS_HEIGHT)
+
+        // min/max: None → skip (don't reset)
+        CACHE_CHECK(CS_MIN_WIDTH, min_width)
+        unit = parse_dim(min_width, val);
+        if (unit == 1) YGNodeStyleSetMinWidth(&node, val);
+        else if (unit == 2) YGNodeStyleSetMinWidthPercent(&node, val);
+        CACHE_SKIP(CS_MIN_WIDTH)
+
+        CACHE_CHECK(CS_MIN_HEIGHT, min_height)
+        unit = parse_dim(min_height, val);
+        if (unit == 1) YGNodeStyleSetMinHeight(&node, val);
+        else if (unit == 2) YGNodeStyleSetMinHeightPercent(&node, val);
+        CACHE_SKIP(CS_MIN_HEIGHT)
+
+        CACHE_CHECK(CS_MAX_WIDTH, max_width)
+        unit = parse_dim(max_width, val);
+        if (unit == 1) YGNodeStyleSetMaxWidth(&node, val);
+        else if (unit == 2) YGNodeStyleSetMaxWidthPercent(&node, val);
+        CACHE_SKIP(CS_MAX_WIDTH)
+
+        CACHE_CHECK(CS_MAX_HEIGHT, max_height)
+        unit = parse_dim(max_height, val);
+        if (unit == 1) YGNodeStyleSetMaxHeight(&node, val);
+        else if (unit == 2) YGNodeStyleSetMaxHeightPercent(&node, val);
+        CACHE_SKIP(CS_MAX_HEIGHT)
+
+        // ── Flex ──
+        CACHE_CHECK(CS_FLEX_GROW, flex_grow)
+        if (!flex_grow.is_none())
+            YGNodeStyleSetFlexGrow(&node, nb::cast<float>(flex_grow));
+        CACHE_SKIP(CS_FLEX_GROW)
+
+        CACHE_CHECK(CS_FLEX_SHRINK, flex_shrink)
+        if (!flex_shrink.is_none())
+            YGNodeStyleSetFlexShrink(&node, nb::cast<float>(flex_shrink));
+        CACHE_SKIP(CS_FLEX_SHRINK)
+
+        CACHE_CHECK(CS_FLEX_BASIS, flex_basis)
+        if (!flex_basis.is_none()) {
+            unit = parse_dim(flex_basis, val);
+            if (unit == 1) YGNodeStyleSetFlexBasis(&node, val);
+            else if (unit == 2) YGNodeStyleSetFlexBasisPercent(&node, val);
+            else YGNodeStyleSetFlexBasisAuto(&node);
+        }
+        CACHE_SKIP(CS_FLEX_BASIS)
+
+        // ── Enum props (interned pointer compare first, string fallback) ──
+        CACHE_CHECK(CS_FLEX_DIRECTION, flex_direction)
+        if (!flex_direction.is_none() && nb::isinstance<nb::str>(flex_direction)) {
+            PyObject* p = flex_direction.ptr();
+            YGFlexDirection fd = YGFlexDirectionColumn;
+            if (p == interned::row) fd = YGFlexDirectionRow;
+            else if (p == interned::column_reverse) fd = YGFlexDirectionColumnReverse;
+            else if (p == interned::row_reverse) fd = YGFlexDirectionRowReverse;
+            else if (p != interned::column) {
+                // Fallback: non-interned string
+                std::string s = nb::cast<std::string>(flex_direction);
+                if (s == "row") fd = YGFlexDirectionRow;
+                else if (s == "column-reverse") fd = YGFlexDirectionColumnReverse;
+                else if (s == "row-reverse") fd = YGFlexDirectionRowReverse;
+            }
+            YGNodeStyleSetFlexDirection(&node, fd);
+        }
+        CACHE_SKIP(CS_FLEX_DIRECTION)
+
+        CACHE_CHECK(CS_FLEX_WRAP, flex_wrap)
+        if (!flex_wrap.is_none() && nb::isinstance<nb::str>(flex_wrap)) {
+            PyObject* p = flex_wrap.ptr();
+            YGWrap w = YGWrapNoWrap;
+            if (p == interned::wrap) w = YGWrapWrap;
+            else if (p == interned::wrap_reverse) w = YGWrapWrapReverse;
+            else if (p != interned::nowrap) {
+                std::string s = nb::cast<std::string>(flex_wrap);
+                if (s == "wrap") w = YGWrapWrap;
+                else if (s == "wrap-reverse") w = YGWrapWrapReverse;
+            }
+            YGNodeStyleSetFlexWrap(&node, w);
+        }
+        CACHE_SKIP(CS_FLEX_WRAP)
+
+        CACHE_CHECK(CS_JUSTIFY_CONTENT, justify_content)
+        if (!justify_content.is_none() && nb::isinstance<nb::str>(justify_content)) {
+            PyObject* p = justify_content.ptr();
+            YGJustify j = YGJustifyFlexStart;
+            if (p == interned::flex_end) j = YGJustifyFlexEnd;
+            else if (p == interned::center) j = YGJustifyCenter;
+            else if (p == interned::space_between) j = YGJustifySpaceBetween;
+            else if (p == interned::space_around) j = YGJustifySpaceAround;
+            else if (p == interned::space_evenly) j = YGJustifySpaceEvenly;
+            else if (p != interned::flex_start) {
+                std::string s = nb::cast<std::string>(justify_content);
+                if (s == "flex-end") j = YGJustifyFlexEnd;
+                else if (s == "center") j = YGJustifyCenter;
+                else if (s == "space-between") j = YGJustifySpaceBetween;
+                else if (s == "space-around") j = YGJustifySpaceAround;
+                else if (s == "space-evenly") j = YGJustifySpaceEvenly;
+            }
+            YGNodeStyleSetJustifyContent(&node, j);
+        }
+        CACHE_SKIP(CS_JUSTIFY_CONTENT)
+
+        CACHE_CHECK(CS_ALIGN_ITEMS, align_items)
+        if (!align_items.is_none() && nb::isinstance<nb::str>(align_items)) {
+            PyObject* p = align_items.ptr();
+            YGAlign a = YGAlignStretch;
+            if (p == interned::flex_start) a = YGAlignFlexStart;
+            else if (p == interned::flex_end) a = YGAlignFlexEnd;
+            else if (p == interned::center) a = YGAlignCenter;
+            else if (p == interned::baseline) a = YGAlignBaseline;
+            else if (p == interned::auto_) a = YGAlignAuto;
+            else if (p != interned::stretch) {
+                std::string s = nb::cast<std::string>(align_items);
+                if (s == "flex-start") a = YGAlignFlexStart;
+                else if (s == "flex-end") a = YGAlignFlexEnd;
+                else if (s == "center") a = YGAlignCenter;
+                else if (s == "baseline") a = YGAlignBaseline;
+                else if (s == "auto") a = YGAlignAuto;
+            }
+            YGNodeStyleSetAlignItems(&node, a);
+        }
+        CACHE_SKIP(CS_ALIGN_ITEMS)
+
+        CACHE_CHECK(CS_ALIGN_SELF, align_self)
+        if (!align_self.is_none() && nb::isinstance<nb::str>(align_self)) {
+            PyObject* p = align_self.ptr();
+            YGAlign a = YGAlignAuto;
+            if (p == interned::stretch) a = YGAlignStretch;
+            else if (p == interned::flex_start) a = YGAlignFlexStart;
+            else if (p == interned::flex_end) a = YGAlignFlexEnd;
+            else if (p == interned::center) a = YGAlignCenter;
+            else if (p == interned::baseline) a = YGAlignBaseline;
+            else if (p != interned::auto_) {
+                std::string s = nb::cast<std::string>(align_self);
+                if (s == "stretch") a = YGAlignStretch;
+                else if (s == "flex-start") a = YGAlignFlexStart;
+                else if (s == "flex-end") a = YGAlignFlexEnd;
+                else if (s == "center") a = YGAlignCenter;
+                else if (s == "baseline") a = YGAlignBaseline;
+            }
+            YGNodeStyleSetAlignSelf(&node, a);
+        }
+        CACHE_SKIP(CS_ALIGN_SELF)
+
+        // ── Gap ──
+        CACHE_CHECK(CS_GAP, gap)
+        if (!gap.is_none())
+            YGNodeStyleSetGap(&node, YGGutterAll, nb::cast<float>(gap));
+        CACHE_SKIP(CS_GAP)
+
+        // ── Overflow ──
+        CACHE_CHECK(CS_OVERFLOW, overflow)
+        if (!overflow.is_none() && nb::isinstance<nb::str>(overflow)) {
+            PyObject* p = overflow.ptr();
+            YGOverflow o = YGOverflowVisible;
+            if (p == interned::hidden) o = YGOverflowHidden;
+            else if (p == interned::scroll) o = YGOverflowScroll;
+            else if (p != interned::visible) {
+                std::string s = nb::cast<std::string>(overflow);
+                if (s == "hidden") o = YGOverflowHidden;
+                else if (s == "scroll") o = YGOverflowScroll;
+            }
+            YGNodeStyleSetOverflow(&node, o);
+        }
+        CACHE_SKIP(CS_OVERFLOW)
+
+        // ── Position type ──
+        CACHE_CHECK(CS_POSITION_TYPE, position_type)
+        if (!position_type.is_none() && nb::isinstance<nb::str>(position_type)) {
+            PyObject* p = position_type.ptr();
+            YGPositionType pt = YGPositionTypeRelative;
+            if (p == interned::absolute) pt = YGPositionTypeAbsolute;
+            else if (p == interned::static_) pt = YGPositionTypeStatic;
+            else if (p != interned::relative) {
+                std::string s = nb::cast<std::string>(position_type);
+                if (s == "absolute") pt = YGPositionTypeAbsolute;
+            }
+            YGNodeStyleSetPositionType(&node, pt);
+        }
+        CACHE_SKIP(CS_POSITION_TYPE)
+
+        // ── Padding (always set, caller includes border offset) ──
+        if (padding_top != cache.padding[0]) {
+            cache.padding[0] = padding_top;
+            YGNodeStyleSetPadding(&node, YGEdgeTop, padding_top);
+        }
+        if (padding_right != cache.padding[1]) {
+            cache.padding[1] = padding_right;
+            YGNodeStyleSetPadding(&node, YGEdgeRight, padding_right);
+        }
+        if (padding_bottom != cache.padding[2]) {
+            cache.padding[2] = padding_bottom;
+            YGNodeStyleSetPadding(&node, YGEdgeBottom, padding_bottom);
+        }
+        if (padding_left != cache.padding[3]) {
+            cache.padding[3] = padding_left;
+            YGNodeStyleSetPadding(&node, YGEdgeLeft, padding_left);
+        }
+
+        // ── Margin ──
+        CACHE_CHECK(CS_MARGIN, margin)
+        if (!margin.is_none())
+            YGNodeStyleSetMargin(&node, YGEdgeAll, nb::cast<float>(margin));
+        CACHE_SKIP(CS_MARGIN)
+
+        CACHE_CHECK(CS_MARGIN_TOP, margin_top)
+        if (!margin_top.is_none())
+            YGNodeStyleSetMargin(&node, YGEdgeTop, nb::cast<float>(margin_top));
+        CACHE_SKIP(CS_MARGIN_TOP)
+
+        CACHE_CHECK(CS_MARGIN_RIGHT, margin_right)
+        if (!margin_right.is_none())
+            YGNodeStyleSetMargin(&node, YGEdgeRight, nb::cast<float>(margin_right));
+        CACHE_SKIP(CS_MARGIN_RIGHT)
+
+        CACHE_CHECK(CS_MARGIN_BOTTOM, margin_bottom)
+        if (!margin_bottom.is_none())
+            YGNodeStyleSetMargin(&node, YGEdgeBottom, nb::cast<float>(margin_bottom));
+        CACHE_SKIP(CS_MARGIN_BOTTOM)
+
+        CACHE_CHECK(CS_MARGIN_LEFT, margin_left)
+        if (!margin_left.is_none())
+            YGNodeStyleSetMargin(&node, YGEdgeLeft, nb::cast<float>(margin_left));
+        CACHE_SKIP(CS_MARGIN_LEFT)
+
+        // ── Position edges ──
+        CACHE_CHECK(CS_POS_TOP, pos_top)
+        unit = parse_dim(pos_top, val);
+        if (unit == 1) YGNodeStyleSetPosition(&node, YGEdgeTop, val);
+        else if (unit == 2) YGNodeStyleSetPositionPercent(&node, YGEdgeTop, val);
+        CACHE_SKIP(CS_POS_TOP)
+
+        CACHE_CHECK(CS_POS_RIGHT, pos_right)
+        unit = parse_dim(pos_right, val);
+        if (unit == 1) YGNodeStyleSetPosition(&node, YGEdgeRight, val);
+        else if (unit == 2) YGNodeStyleSetPositionPercent(&node, YGEdgeRight, val);
+        CACHE_SKIP(CS_POS_RIGHT)
+
+        CACHE_CHECK(CS_POS_BOTTOM, pos_bottom)
+        unit = parse_dim(pos_bottom, val);
+        if (unit == 1) YGNodeStyleSetPosition(&node, YGEdgeBottom, val);
+        else if (unit == 2) YGNodeStyleSetPositionPercent(&node, YGEdgeBottom, val);
+        CACHE_SKIP(CS_POS_BOTTOM)
+
+        CACHE_CHECK(CS_POS_LEFT, pos_left)
+        unit = parse_dim(pos_left, val);
+        if (unit == 1) YGNodeStyleSetPosition(&node, YGEdgeLeft, val);
+        else if (unit == 2) YGNodeStyleSetPositionPercent(&node, YGEdgeLeft, val);
+        CACHE_SKIP(CS_POS_LEFT)
+
+        #undef CACHE_CHECK
+        #undef CACHE_SKIP
+    },
+    nb::arg("node"),
+    nb::arg("width") = nb::none(), nb::arg("height") = nb::none(),
+    nb::arg("min_width") = nb::none(), nb::arg("min_height") = nb::none(),
+    nb::arg("max_width") = nb::none(), nb::arg("max_height") = nb::none(),
+    nb::arg("flex_grow") = nb::none(), nb::arg("flex_shrink") = nb::none(),
+    nb::arg("flex_basis") = nb::none(),
+    nb::arg("flex_direction") = nb::none(), nb::arg("flex_wrap") = nb::none(),
+    nb::arg("justify_content") = nb::none(), nb::arg("align_items") = nb::none(),
+    nb::arg("align_self") = nb::none(),
+    nb::arg("gap") = nb::none(), nb::arg("overflow") = nb::none(),
+    nb::arg("position_type") = nb::none(),
+    nb::arg("padding_top") = 0.0f, nb::arg("padding_right") = 0.0f,
+    nb::arg("padding_bottom") = 0.0f, nb::arg("padding_left") = 0.0f,
+    nb::arg("margin") = nb::none(), nb::arg("margin_top") = nb::none(),
+    nb::arg("margin_right") = nb::none(), nb::arg("margin_bottom") = nb::none(),
+    nb::arg("margin_left") = nb::none(),
+    nb::arg("pos_top") = nb::none(), nb::arg("pos_right") = nb::none(),
+    nb::arg("pos_bottom") = nb::none(), nb::arg("pos_left") = nb::none(),
+    "Configure all layout properties on a yoga node in a single C++ call.");
+
+    // Evict a node from the configure_node_fast cache (called on node destruction).
+    m.def("clear_node_cache", [](yoga::Node& node) {
+        node_cache_.erase(&node);
+    }, nb::arg("node"),
+    "Remove a node from the configure_node_fast field cache.");
+
+    // ── apply_layout_tree: walk a widget tree, apply yoga layout, collect deltas ──
+    //
+    // Accelerator for widget frameworks that maintain a tree of Python objects
+    // with yoga nodes attached.  Walks the tree in C++, reads yoga layout
+    // results, writes absolute geometry back to Python __slots__, clears dirty
+    // flags, and returns a list of "repaint facts" for nodes whose geometry
+    // changed or were dirty.
+    //
+    // The `offsets` dict maps slot names to byte offsets (from tp_basicsize or
+    // __slots__) so the function can read/write arbitrary Python objects without
+    // knowing their class.  Required keys:
+    //   _x, _y, _layout_width, _layout_height  — int slots for absolute geometry
+    //   _dirty, _subtree_dirty                  — bool slots for dirty flags
+    //   _children                               — list slot for tree traversal
+    //   _parent                                 — slot for parent reference
+    //   _yoga_node                              — slot holding the yoga.Node
+    //   _on_size_change                         — optional callable(width, height)
+    //
+    // Returns list of tuples:
+    //   (node, parent_id, has_children, was_dirty,
+    //    old_x, old_y, old_w, old_h, new_x, new_y, new_w, new_h)
+    m.def("apply_layout_tree", [](nb::object root, nb::dict offsets_dict, int origin_x, int origin_y) {
+        struct Offsets {
+            Py_ssize_t x, y, layout_width, layout_height;
+            Py_ssize_t dirty, subtree_dirty, children, parent, yoga_node;
+            Py_ssize_t on_size_change;
+        } off;
+        auto get_off = [&](const char* name) -> Py_ssize_t {
+            return nb::cast<Py_ssize_t>(offsets_dict[name]);
+        };
+        off.x = get_off("_x");
+        off.y = get_off("_y");
+        off.layout_width = get_off("_layout_width");
+        off.layout_height = get_off("_layout_height");
+        off.dirty = get_off("_dirty");
+        off.subtree_dirty = get_off("_subtree_dirty");
+        off.children = get_off("_children");
+        off.parent = get_off("_parent");
+        off.yoga_node = get_off("_yoga_node");
+        off.on_size_change = get_off("_on_size_change");
+
+        auto read_slot = [](PyObject* obj, Py_ssize_t offset) -> PyObject* {
+            return offset < 0 ? nullptr : *(PyObject**)((char*)obj + offset);
+        };
+
+        auto write_slot = [](PyObject* obj, Py_ssize_t offset, PyObject* new_val) {
+            PyObject** slot = (PyObject**)((char*)obj + offset);
+            PyObject* old = *slot;
+            Py_INCREF(new_val);
+            *slot = new_val;
+            Py_XDECREF(old);
+        };
+
+        auto read_long_slot = [&](PyObject* obj, Py_ssize_t offset) -> int {
+            if (offset < 0) return 0;
+            PyObject* value = read_slot(obj, offset);
+            if (!value || value == Py_None) return 0;
+            long result = PyLong_AsLong(value);
+            if (PyErr_Occurred()) {
+                PyErr_Clear();
+                return 0;
+            }
+            return static_cast<int>(result);
+        };
+
+        nb::list facts;
+        struct Walker {
+            Offsets& off;
+            decltype(read_slot)& read;
+            decltype(write_slot)& write;
+            decltype(read_long_slot)& read_long;
+            nb::list& facts;
+
+            void walk(PyObject* node, int parent_x, int parent_y) {
+                PyObject* yoga_py = read(node, off.yoga_node);
+                if (!yoga_py || yoga_py == Py_None) return;
+
+                yoga::Node* yoga_node;
+                try {
+                    yoga_node = nb::cast<yoga::Node*>(nb::handle(yoga_py));
+                } catch (...) {
+                    return;
+                }
+
+                int lx = static_cast<int>(YGNodeLayoutGetLeft(yoga_node));
+                int ly = static_cast<int>(YGNodeLayoutGetTop(yoga_node));
+                int lw = static_cast<int>(YGNodeLayoutGetWidth(yoga_node));
+                int lh = static_cast<int>(YGNodeLayoutGetHeight(yoga_node));
+
+                const int old_x = read_long(node, off.x);
+                const int old_y = read_long(node, off.y);
+                const int old_w = read_long(node, off.layout_width);
+                const int old_h = read_long(node, off.layout_height);
+                const bool was_dirty = off.dirty >= 0 && read(node, off.dirty) == Py_True;
+
+                PyObject* old_w_obj = read(node, off.layout_width);
+                PyObject* old_h_obj = read(node, off.layout_height);
+                Py_XINCREF(old_w_obj);
+                Py_XINCREF(old_h_obj);
+
+                const int abs_x = lx + parent_x;
+                const int abs_y = ly + parent_y;
+                const bool geom_changed = old_x != abs_x || old_y != abs_y || old_w != lw || old_h != lh;
+
+                if (geom_changed) {
+                    PyObject* py_x = PyLong_FromLong(abs_x);
+                    PyObject* py_y = PyLong_FromLong(abs_y);
+                    PyObject* py_w = PyLong_FromLong(lw);
+                    PyObject* py_h = PyLong_FromLong(lh);
+                    write(node, off.x, py_x);
+                    write(node, off.y, py_y);
+                    write(node, off.layout_width, py_w);
+                    write(node, off.layout_height, py_h);
+                    Py_DECREF(py_x);
+                    Py_DECREF(py_y);
+                    Py_DECREF(py_w);
+                    Py_DECREF(py_h);
+                }
+                if (was_dirty) write(node, off.dirty, Py_False);
+                if (off.subtree_dirty >= 0 && read(node, off.subtree_dirty) == Py_True) {
+                    write(node, off.subtree_dirty, Py_False);
+                }
+
+                PyObject* children = read(node, off.children);
+                const bool has_children =
+                    children && PyList_Check(children) && PyList_GET_SIZE(children) > 0;
+                if (was_dirty || geom_changed) {
+                    PyObject* parent = read(node, off.parent);
+                    facts.append(nb::make_tuple(
+                        nb::borrow<nb::object>(node),
+                        parent && parent != Py_None ? reinterpret_cast<uintptr_t>(parent) : 0,
+                        has_children,
+                        was_dirty,
+                        old_x,
+                        old_y,
+                        old_w,
+                        old_h,
+                        abs_x,
+                        abs_y,
+                        lw,
+                        lh
+                    ));
+                }
+
+                PyObject* size_cb = off.on_size_change >= 0 ? read(node, off.on_size_change) : nullptr;
+                if (size_cb && size_cb != Py_None) {
+                    const bool w_changed = !old_w_obj || PyLong_AsLong(old_w_obj) != lw;
+                    const bool h_changed = !old_h_obj || PyLong_AsLong(old_h_obj) != lh;
+                    if (w_changed || h_changed) {
+                        PyObject* result = PyObject_CallFunction(size_cb, "ii", lw, lh);
+                        if (result) Py_DECREF(result);
+                        else PyErr_Clear();
+                    }
+                }
+                Py_XDECREF(old_w_obj);
+                Py_XDECREF(old_h_obj);
+
+                if (has_children) {
+                    Py_ssize_t n = PyList_GET_SIZE(children);
+                    for (Py_ssize_t i = 0; i < n; ++i) {
+                        walk(PyList_GET_ITEM(children, i), abs_x, abs_y);
+                    }
+                }
+            }
+        };
+
+        Walker walker{off, read_slot, write_slot, read_long_slot, facts};
+        walker.walk(root.ptr(), origin_x, origin_y);
+        return facts;
+    }, nb::arg("root"), nb::arg("offsets"), nb::arg("origin_x") = 0, nb::arg("origin_y") = 0,
+    "Walk a widget tree in C++, apply yoga layout results to Python __slots__,\n"
+    "clear dirty flags, and return repaint facts for changed nodes.\n\n"
+    "The offsets dict maps slot names (_x, _y, _layout_width, _layout_height,\n"
+    "_dirty, _subtree_dirty, _children, _parent, _yoga_node, _on_size_change)\n"
+    "to byte offsets so arbitrary Python objects can be read/written by slot.");
+
+    // ── get_layout_batch: read all 4 layout results in one C++ call ──
+    //
+    // Returns (left, top, width, height) as integers, avoiding 4 separate
+    // Python→C++ property getter round-trips.
+    m.def("get_layout_batch", [](yoga::Node& node) -> nb::tuple {
+        return nb::make_tuple(
+            static_cast<int>(YGNodeLayoutGetLeft(&node)),
+            static_cast<int>(YGNodeLayoutGetTop(&node)),
+            static_cast<int>(YGNodeLayoutGetWidth(&node)),
+            static_cast<int>(YGNodeLayoutGetHeight(&node))
+        );
+    }, nb::arg("node"),
+    "Get (left, top, width, height) layout results as integers in one call.");
+
     // Clean up all Python-side resources during module teardown.
     // Using a capsule ensures cleanup runs when the module dict is cleared,
     // before nanobind's leak checker fires.
@@ -1017,5 +1665,6 @@ NB_MODULE(yoga, m) {
         allCloneContexts.clear();
 
         nanobindManagedNodes.clear();
+        node_cache_.clear();
     });
 }
