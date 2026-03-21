@@ -1,6 +1,8 @@
 from collections.abc import Callable
 from typing import Any
 
+type LayoutRepaintFact = tuple[object, int, bool, bool, int, int, int, int, int, int, int, int]
+
 # Enums (nanobind enum types)
 class Direction:
     Inherit: Direction
@@ -576,6 +578,47 @@ class Node:
     def layout_margin(self, edge: Edge | int) -> float: ...
     def layout_padding(self, edge: Edge | int) -> float: ...
     def layout_border(self, edge: Edge | int) -> float: ...
+
+# Batch layout helpers
+def configure_node_fast(
+    node: Node,
+    *,
+    width: float | str | None = None,
+    height: float | str | None = None,
+    min_width: float | str | None = None,
+    min_height: float | str | None = None,
+    max_width: float | str | None = None,
+    max_height: float | str | None = None,
+    flex_grow: float | None = None,
+    flex_shrink: float | None = None,
+    flex_basis: float | str | None = None,
+    flex_direction: str | None = None,
+    flex_wrap: str | None = None,
+    justify_content: str | None = None,
+    align_items: str | None = None,
+    align_self: str | None = None,
+    gap: float | None = None,
+    overflow: str | None = None,
+    position_type: str | None = None,
+    padding_top: float = 0.0,
+    padding_right: float = 0.0,
+    padding_bottom: float = 0.0,
+    padding_left: float = 0.0,
+    margin: float | None = None,
+    margin_top: float | None = None,
+    margin_right: float | None = None,
+    margin_bottom: float | None = None,
+    margin_left: float | None = None,
+    pos_top: float | str | None = None,
+    pos_right: float | str | None = None,
+    pos_bottom: float | str | None = None,
+    pos_left: float | str | None = None,
+) -> None: ...
+def clear_node_cache(node: Node) -> None: ...
+def apply_layout_tree(
+    root: object, offsets: dict[str, int], origin_x: int = 0, origin_y: int = 0
+) -> list[LayoutRepaintFact]: ...
+def get_layout_batch(node: Node) -> tuple[int, int, int, int]: ...
 
 # Event system
 def event_subscribe(callback: Callable[[int, EventType, Any], None]) -> None: ...

@@ -91,3 +91,18 @@ class TestTreeMutation:
 
         root.free_recursive()
         root_child0.free()
+
+    def test_set_children_same_order_is_noop(self):
+        config = Config()
+        root = Node(config)
+        root_child0 = Node(config)
+        root_child1 = Node(config)
+
+        root.set_children([root_child0, root_child1])
+        root.set_children([root_child0, root_child1])
+
+        assert get_children(root) == [root_child0, root_child1]
+        assert root_child0.owner is root
+        assert root_child1.owner is root
+
+        root.free_recursive()
