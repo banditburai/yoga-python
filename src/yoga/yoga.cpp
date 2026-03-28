@@ -568,11 +568,13 @@ NB_MODULE(yoga, m) {
         .def("__init__", [](yoga::Node *t) {
             new (t) yoga::Node();
             nanobindManagedNodes.insert(t);
+            node_cache_.erase(t);  // evict stale cache from address reuse
             yoga::Event::publish<yoga::Event::NodeAllocation>(t, {YGNodeGetConfig(t)});
         })
         .def("__init__", [](yoga::Node *t, yoga::Config* config) {
             new (t) yoga::Node(config);
             nanobindManagedNodes.insert(t);
+            node_cache_.erase(t);  // evict stale cache from address reuse
             yoga::Event::publish<yoga::Event::NodeAllocation>(t, {YGNodeGetConfig(t)});
         }, nb::arg("config"))
         .def("__len__", [](yoga::Node& self) { return YGNodeGetChildCount(&self); })
@@ -586,7 +588,10 @@ NB_MODULE(yoga, m) {
         })
         .def("free", [](yoga::Node& self) { safeNodeFree(self); })
         .def("free_recursive", [](yoga::Node& self) { safeNodeFreeRecursive(self); })
-        .def("reset", [](yoga::Node& self) { YGNodeReset(&self); })
+        .def("reset", [](yoga::Node& self) {
+            node_cache_.erase(&self);  // reset clears all styles; cache must follow
+            YGNodeReset(&self);
+        })
         .def("copy_style", [](yoga::Node& self, const yoga::Node& src) { YGNodeCopyStyle(&self, &src); })
         .def("set_context", [](yoga::Node& self, nb::object context) {
             if (context.is_none()) {

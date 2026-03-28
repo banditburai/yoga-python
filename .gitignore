@@ -20,6 +20,7 @@ wheels/
 CMakeFiles/
 CMakeCache.txt
 build_test/
+build_manual/
 src/yoga/*.so
 src/yoga/CMakeInit.txt
 src/yoga/install_manifest.txt
