@@ -24,10 +24,14 @@ jobs:
         include:
           - os: linux
             runs-on: ubuntu-22.04
+          - os: linux-arm
+            runs-on: ubuntu-22.04-arm
           - os: windows
             runs-on: windows-latest
           - os: macos
             runs-on: macos-latest
+          - os: macos-intel
+            runs-on: macos-13
 
     steps:
       - uses: actions/checkout@v4
